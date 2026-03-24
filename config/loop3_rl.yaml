@@ -1,0 +1,33 @@
+loop3:
+  algorithm: "grpo"
+  tree_branching_factor: 4
+  prefix_share_depth: 3
+  rollout_temperature: 0.8
+  rollout_top_p: 0.95
+
+  dapo:
+    epsilon_low: 0.1
+    epsilon_high: 0.28
+
+  entropy:
+    min_entropy: 0.01
+    entropy_coeff: 0.01
+
+  filtering:
+    echo_trap_threshold: 3
+    min_trajectory_reward: 0.1
+    max_trajectory_length: 30
+
+  training:
+    train_batch_size: 16
+    rollout_n: 4
+    learning_rate: 5.0e-7
+    total_epochs: 3
+    kl_loss_coef: 0.001
+    gradient_checkpointing: true
+    bf16: true
+
+  schedule:
+    start_hour: 22
+    end_hour: 6
+    min_distill_checkpoints: 1

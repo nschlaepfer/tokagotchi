@@ -1,0 +1,41 @@
+model:
+  name: "Qwen/Qwen3.5-27B"
+  quantization: "awq"
+  vllm_gpu_memory_utilization: 0.50
+  vllm_port: 8000
+  vllm_host: "localhost"
+
+opus:
+  daily_budget_usd: 50.0
+  hourly_budget_usd: 10.0
+  session_dir: "./data/opus_sessions"
+  model: "claude-opus-4-6"
+  default_max_turns: 10
+  default_max_budget_per_call_usd: 0.50
+
+vram:
+  total_gb: 32
+  serving_allocation_gb: 16
+  training_allocation_gb: 32
+
+git:
+  enabled: true
+  branch_prefix: "exp"
+  auto_commit: true
+
+schedule:
+  loop1_continuous: true
+  loop2_trigger_threshold: 500
+  loop2_diversity_min_types: 3
+  loop3_start_hour: 22
+  loop3_end_hour: 6
+  eval_frequency_minutes: 60
+
+paths:
+  data_dir: "./data"
+  prompts_dir: "./data/prompts"
+  traces_dir: "./data/traces"
+  pending_jsonl: "./data/pending.jsonl"
+  curriculum_dir: "./data/curriculum"
+  checkpoints_dir: "./data/checkpoints"
+  benchmarks_dir: "./eval/benchmarks"

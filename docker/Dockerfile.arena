@@ -1,0 +1,34 @@
+FROM python:3.11-slim
+
+# System dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        sqlite3 \
+        git \
+        curl \
+        jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+RUN pip install --no-cache-dir \
+    requests \
+    pandas \
+    numpy \
+    flask
+
+# Create non-root user
+RUN useradd -m -s /bin/bash agent
+
+# Set up workspace
+RUN mkdir -p /workspace && chown agent:agent /workspace
+WORKDIR /workspace
+
+# Copy mock API server
+COPY mock_api_server.py /opt/mock_api_server.py
+RUN chmod +x /opt/mock_api_server.py
+
+# Switch to non-root user
+USER agent
+
+# Keep container alive for interactive use
+ENTRYPOINT ["sleep", "infinity"]

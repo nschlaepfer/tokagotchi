@@ -1,0 +1,381 @@
+"""Self-Evolving Curriculum (SEC) engine.
+
+Maintains a task bank with per-task statistics, implements weighted
+sampling that focuses on tasks in the 10-90% success band, and provides
+retirement/shelving logic to keep the curriculum at the agent's frontier.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import math
+import random
+import time
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+from src.models import TaskSpec, TaskType, Trajectory
+
+logger = logging.getLogger(__name__)
+
+# Thresholds for task lifecycle
+RETIRE_THRESHOLD = 0.90  # Success > 90% -> retire (too easy)
+SHELVE_THRESHOLD = 0.10  # Success < 10% -> shelve (too hard)
+MIN_ATTEMPTS_FOR_DECISION = 5  # Need at least this many attempts to retire/shelve
+
+
+class SECEngine:
+    """Self-Evolving Curriculum engine.
+
+    Manages a bank of tasks, tracks per-task success statistics, and
+    provides weighted sampling that focuses training on the productive
+    learning frontier (tasks with 10-90% success rate).
+
+    Parameters
+    ----------
+    task_bank_path:
+        Path to the JSON file for persisting the task bank.
+    """
+
+    def __init__(self, task_bank_path: str | Path = "./data/task_bank.json") -> None:
+        self._task_bank_path = Path(task_bank_path)
+        self._bank: dict[str, dict[str, Any]] = {}
+        self._load()
+
+    # ------------------------------------------------------------------
+    # Task bank persistence
+    # ------------------------------------------------------------------
+
+    def _load(self) -> None:
+        """Load task bank from JSON if it exists."""
+        if self._task_bank_path.exists():
+            try:
+                with open(self._task_bank_path) as f:
+                    self._bank = json.load(f)
+                logger.info("Loaded task bank: %d tasks", len(self._bank))
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning("Failed to load task bank: %s", exc)
+                self._bank = {}
+        else:
+            self._bank = {}
+
+    def save(self) -> None:
+        """Save the task bank to JSON."""
+        self._task_bank_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._task_bank_path, "w") as f:
+            json.dump(self._bank, f, indent=2, default=str)
+        logger.debug("Saved task bank: %d tasks", len(self._bank))
+
+    # ------------------------------------------------------------------
+    # Task registration
+    # ------------------------------------------------------------------
+
+    def add_task(self, spec: TaskSpec) -> None:
+        """Add a new task to the bank.
+
+        If the task_id already exists, the spec is updated but
+        statistics are preserved.
+        """
+        if spec.task_id in self._bank:
+            self._bank[spec.task_id]["spec"] = asdict(spec)
+            return
+
+        self._bank[spec.task_id] = {
+            "spec": asdict(spec),
+            "attempts": 0,
+            "successes": 0,
+            "avg_steps": 0.0,
+            "last_attempted": None,
+            "status": "active",  # active | retired | shelved
+        }
+
+    def add_tasks(self, specs: list[TaskSpec]) -> None:
+        """Add multiple tasks to the bank."""
+        for spec in specs:
+            self.add_task(spec)
+
+    # ------------------------------------------------------------------
+    # Sampling
+    # ------------------------------------------------------------------
+
+    def sample_tasks(self, batch_size: int) -> list[TaskSpec]:
+        """Sample a batch of tasks using weighted sampling.
+
+        Tasks in the 10-90% success band receive the highest weight.
+        New tasks (< MIN_ATTEMPTS_FOR_DECISION attempts) also get
+        elevated weight so they are explored.
+
+        Parameters
+        ----------
+        batch_size:
+            Number of tasks to sample.
+
+        Returns
+        -------
+        list[TaskSpec]
+            Sampled task specifications.
+        """
+        active_tasks = [
+            (tid, entry)
+            for tid, entry in self._bank.items()
+            if entry.get("status", "active") == "active"
+        ]
+
+        if not active_tasks:
+            logger.warning("No active tasks in bank")
+            return []
+
+        # Compute weights
+        weights: list[float] = []
+        for _, entry in active_tasks:
+            w = self._sampling_weight(entry)
+            weights.append(w)
+
+        # Normalize
+        total_w = sum(weights)
+        if total_w <= 0:
+            # Uniform fallback
+            weights = [1.0] * len(active_tasks)
+            total_w = float(len(active_tasks))
+
+        probs = [w / total_w for w in weights]
+
+        # Sample (with replacement if batch > available)
+        n = min(batch_size, len(active_tasks))
+        indices = random.choices(range(len(active_tasks)), weights=probs, k=n)
+
+        result: list[TaskSpec] = []
+        for idx in indices:
+            tid, entry = active_tasks[idx]
+            spec_dict = entry["spec"]
+            spec = self._dict_to_taskspec(spec_dict)
+            result.append(spec)
+
+        return result
+
+    def _sampling_weight(self, entry: dict[str, Any]) -> float:
+        """Compute sampling weight for a task entry.
+
+        Highest weight for tasks in the 10-90% success band.
+        New tasks (few attempts) get a bonus to ensure exploration.
+        """
+        attempts = entry.get("attempts", 0)
+
+        # New tasks: exploration bonus
+        if attempts < MIN_ATTEMPTS_FOR_DECISION:
+            return 3.0
+
+        success_rate = entry.get("successes", 0) / max(attempts, 1)
+
+        # Bell curve centered at 50% success rate
+        # Weight = exp(-((sr - 0.5) / 0.25)^2)
+        # This gives high weight around 50% and drops off near 0% and 100%
+        deviation = (success_rate - 0.5) / 0.25
+        weight = math.exp(-(deviation ** 2))
+
+        # Floor to ensure even extreme tasks get some chance
+        return max(weight, 0.05)
+
+    # ------------------------------------------------------------------
+    # Statistics update
+    # ------------------------------------------------------------------
+
+    def update_stats(
+        self,
+        task_id: str,
+        success: bool,
+        trajectory: Trajectory,
+    ) -> None:
+        """Update per-task statistics after an episode.
+
+        Parameters
+        ----------
+        task_id:
+            The task that was attempted.
+        success:
+            Whether the agent succeeded.
+        trajectory:
+            The full trajectory for computing step-count averages.
+        """
+        if task_id not in self._bank:
+            logger.warning("update_stats: unknown task_id '%s'", task_id)
+            return
+
+        entry = self._bank[task_id]
+        entry["attempts"] = entry.get("attempts", 0) + 1
+        if success:
+            entry["successes"] = entry.get("successes", 0) + 1
+
+        # Running average of step count
+        old_avg = entry.get("avg_steps", 0.0)
+        n = entry["attempts"]
+        entry["avg_steps"] = old_avg + (trajectory.num_steps - old_avg) / n
+
+        entry["last_attempted"] = time.time()
+
+    # ------------------------------------------------------------------
+    # Capability profile
+    # ------------------------------------------------------------------
+
+    def get_capability_profile(self) -> dict[str, Any]:
+        """Compute success rates by task_type and by difficulty level.
+
+        Returns
+        -------
+        dict
+            Keys: ``by_type`` (dict[str, float]), ``by_difficulty`` (dict[str, float]),
+            ``overall`` (float), ``total_tasks`` (int), ``active_tasks`` (int).
+        """
+        by_type: dict[str, dict[str, int]] = {}
+        by_difficulty: dict[str, dict[str, int]] = {}
+
+        for entry in self._bank.values():
+            attempts = entry.get("attempts", 0)
+            if attempts == 0:
+                continue
+
+            spec = entry["spec"]
+            successes = entry.get("successes", 0)
+
+            # By type
+            task_type = spec.get("task_type", "unknown")
+            if task_type not in by_type:
+                by_type[task_type] = {"attempts": 0, "successes": 0}
+            by_type[task_type]["attempts"] += attempts
+            by_type[task_type]["successes"] += successes
+
+            # By difficulty bucket (0.0-0.33: easy, 0.33-0.66: medium, 0.66-1.0: hard)
+            difficulty = spec.get("difficulty", 0.5)
+            if difficulty < 0.33:
+                bucket = "easy"
+            elif difficulty < 0.66:
+                bucket = "medium"
+            else:
+                bucket = "hard"
+
+            if bucket not in by_difficulty:
+                by_difficulty[bucket] = {"attempts": 0, "successes": 0}
+            by_difficulty[bucket]["attempts"] += attempts
+            by_difficulty[bucket]["successes"] += successes
+
+        # Convert to success rates
+        type_rates = {
+            k: v["successes"] / max(v["attempts"], 1) for k, v in by_type.items()
+        }
+        diff_rates = {
+            k: v["successes"] / max(v["attempts"], 1) for k, v in by_difficulty.items()
+        }
+
+        total_attempts = sum(e.get("attempts", 0) for e in self._bank.values())
+        total_successes = sum(e.get("successes", 0) for e in self._bank.values())
+
+        return {
+            "by_type": type_rates,
+            "by_difficulty": diff_rates,
+            "overall": total_successes / max(total_attempts, 1),
+            "total_tasks": len(self._bank),
+            "active_tasks": sum(
+                1 for e in self._bank.values()
+                if e.get("status", "active") == "active"
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Retirement / shelving
+    # ------------------------------------------------------------------
+
+    def should_retire(self, task_id: str) -> bool:
+        """True if the task's success rate exceeds 90% (too easy)."""
+        entry = self._bank.get(task_id)
+        if entry is None:
+            return False
+        attempts = entry.get("attempts", 0)
+        if attempts < MIN_ATTEMPTS_FOR_DECISION:
+            return False
+        rate = entry.get("successes", 0) / attempts
+        return rate > RETIRE_THRESHOLD
+
+    def should_shelve(self, task_id: str) -> bool:
+        """True if the task's success rate is below 10% (too hard)."""
+        entry = self._bank.get(task_id)
+        if entry is None:
+            return False
+        attempts = entry.get("attempts", 0)
+        if attempts < MIN_ATTEMPTS_FOR_DECISION:
+            return False
+        rate = entry.get("successes", 0) / attempts
+        return rate < SHELVE_THRESHOLD
+
+    def rebalance(self) -> dict[str, list[str]]:
+        """Retire and shelve tasks based on current statistics.
+
+        Returns a dict with keys ``retired`` and ``shelved``, each
+        mapping to a list of affected task_ids.
+        """
+        retired: list[str] = []
+        shelved: list[str] = []
+
+        for task_id, entry in self._bank.items():
+            if entry.get("status") != "active":
+                continue
+
+            if self.should_retire(task_id):
+                entry["status"] = "retired"
+                retired.append(task_id)
+                logger.info("Retired task %s (too easy)", task_id)
+
+            elif self.should_shelve(task_id):
+                entry["status"] = "shelved"
+                shelved.append(task_id)
+                logger.info("Shelved task %s (too hard)", task_id)
+
+        if retired or shelved:
+            self.save()
+
+        return {"retired": retired, "shelved": shelved}
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    @property
+    def task_count(self) -> int:
+        """Total number of tasks in the bank."""
+        return len(self._bank)
+
+    @property
+    def active_task_count(self) -> int:
+        """Number of active (non-retired, non-shelved) tasks."""
+        return sum(
+            1 for e in self._bank.values()
+            if e.get("status", "active") == "active"
+        )
+
+    def get_task(self, task_id: str) -> TaskSpec | None:
+        """Retrieve a TaskSpec by ID, or None if not found."""
+        entry = self._bank.get(task_id)
+        if entry is None:
+            return None
+        return self._dict_to_taskspec(entry["spec"])
+
+    @staticmethod
+    def _dict_to_taskspec(d: dict[str, Any]) -> TaskSpec:
+        """Convert a serialized dict back into a TaskSpec."""
+        task_type_val = d.get("task_type", "code_debugging")
+        try:
+            task_type = TaskType(task_type_val)
+        except ValueError:
+            task_type = TaskType.CODE_DEBUGGING
+
+        return TaskSpec(
+            task_id=d.get("task_id", ""),
+            task_type=task_type,
+            description=d.get("description", ""),
+            initial_files=d.get("initial_files", {}),
+            test_commands=d.get("test_commands", []),
+            expected_output=d.get("expected_output"),
+            difficulty=d.get("difficulty", 0.5),
+            metadata=d.get("metadata", {}),
+        )

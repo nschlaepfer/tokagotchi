@@ -1,0 +1,26 @@
+rewards:
+  weights:
+    outcome: 0.6
+    process: 0.3
+    efficiency: 0.1
+
+  outcome:
+    test_pass_weight: 1.0
+    exact_match_weight: 1.0
+    partial_credit: true
+
+  process:
+    sample_rate: 0.20
+    opus_budget_per_rating: 0.20
+    dimensions:
+      - correctness
+      - efficiency
+      - reasoning_quality
+      - information_utilization
+    cache_similar_queries: true
+
+  efficiency:
+    repeated_action_penalty: 0.05
+    redundant_read_penalty: 0.03
+    unnecessary_tool_call_penalty: 0.02
+    max_penalty: 0.3

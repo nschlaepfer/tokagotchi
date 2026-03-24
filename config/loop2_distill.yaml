@@ -1,0 +1,32 @@
+loop2:
+  teacher_ratio: 0.20
+  mentor_ratio: 0.80
+  min_buffer_size: 500
+  max_buffer_size: 5000
+  diversity_min_task_types: 3
+  diversity_min_failure_modes: 3
+
+  lora:
+    rank: 64
+    alpha: 32
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+    dropout: 0.05
+
+  training:
+    learning_rate: 2.0e-5
+    batch_size: 4
+    gradient_accumulation_steps: 8
+    max_steps: 500
+    warmup_steps: 50
+    gradient_checkpointing: true
+    optimizer: "adamw_torch"
+    weight_decay: 0.01
+    max_grad_norm: 1.0
+    bf16: true

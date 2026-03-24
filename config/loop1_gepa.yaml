@@ -1,0 +1,14 @@
+loop1:
+  population_size: 20
+  experiments_per_hour: 50
+  eval_tasks_per_genome: 10
+  pareto_objectives:
+    - success_rate
+    - avg_steps
+    - tool_accuracy
+    - code_quality
+  mutation_temperature: 0.7
+  crossover_rate: 0.2
+  elite_size: 5
+  max_prompt_length: 4000
+  seed_prompt_path: "./data/prompts/seed.json"

@@ -1,0 +1,28 @@
+curriculum:
+  initial_task_bank: "./data/curriculum/seed_tasks.json"
+  task_bank_path: "./data/curriculum/task_bank.json"
+
+  sec:
+    retire_threshold: 0.90
+    shelve_threshold: 0.10
+    focus_band: [0.10, 0.90]
+    rebalance_interval: 50
+
+  generation:
+    batch_size: 10
+    opus_budget_per_batch: 3.0
+    task_types:
+      - info_gathering
+      - code_debugging
+      - api_orchestration
+      - open_ended_optimization
+    difficulty_levels: 5
+
+  frontier:
+    probe_interval: 100
+    dimensions:
+      - file_manipulation
+      - code_debugging
+      - api_usage
+      - error_recovery
+      - multi_step_planning

@@ -1,0 +1,234 @@
+[
+  {
+    "task_id": "info_01_csv_stats",
+    "task_type": "info_gathering",
+    "description": "Read the file sales_data.csv and compute the total revenue (price * quantity) for each product category. Report the top 3 categories by revenue.",
+    "initial_files": {
+      "sales_data.csv": "category,product,price,quantity\nElectronics,Laptop,999.99,45\nElectronics,Phone,699.50,120\nClothing,Jacket,89.99,200\nClothing,Shoes,129.99,150\nFood,Coffee,12.99,500\nFood,Tea,8.50,300\nElectronics,Tablet,449.00,80\nClothing,Hat,24.99,400\nFood,Bread,3.99,1000\nFurniture,Desk,349.99,30\nFurniture,Chair,199.99,55"
+    },
+    "test_commands": ["python -c \"import sys; output = open('result.txt').read(); assert 'Electronics' in output and 'Clothing' in output\""],
+    "expected_output": "Top 3 categories: Electronics ($164,819.50), Clothing ($37,393.50), Furniture ($21,499.15)",
+    "difficulty": 0.3
+  },
+  {
+    "task_id": "info_02_log_search",
+    "task_type": "info_gathering",
+    "description": "Search through server.log to find all unique IP addresses that received HTTP 500 errors. Write the count and list to result.txt.",
+    "initial_files": {
+      "server.log": "2024-01-15 10:23:01 192.168.1.10 GET /api/users 200 45ms\n2024-01-15 10:23:15 10.0.0.5 POST /api/login 500 120ms\n2024-01-15 10:24:00 192.168.1.10 GET /api/data 500 89ms\n2024-01-15 10:24:30 172.16.0.1 GET /health 200 5ms\n2024-01-15 10:25:00 10.0.0.5 GET /api/users 500 200ms\n2024-01-15 10:25:30 192.168.1.20 POST /api/upload 500 340ms\n2024-01-15 10:26:00 172.16.0.1 GET /api/data 200 30ms\n2024-01-15 10:26:30 10.0.0.5 DELETE /api/users/5 500 150ms"
+    },
+    "test_commands": ["python -c \"content = open('result.txt').read(); assert '3' in content\""],
+    "expected_output": "3 unique IPs with 500 errors: 10.0.0.5, 192.168.1.10, 192.168.1.20",
+    "difficulty": 0.25
+  },
+  {
+    "task_id": "info_03_json_extract",
+    "task_type": "info_gathering",
+    "description": "Parse the nested JSON in config.json. Extract all 'timeout' values from any level of nesting and write them sorted in ascending order to result.txt, one per line.",
+    "initial_files": {
+      "config.json": "{\"server\": {\"host\": \"0.0.0.0\", \"port\": 8080, \"timeout\": 30}, \"database\": {\"primary\": {\"host\": \"db1\", \"timeout\": 5}, \"replica\": {\"host\": \"db2\", \"timeout\": 10}}, \"cache\": {\"redis\": {\"timeout\": 2}, \"memcached\": {\"timeout\": 3}}, \"external_apis\": [{\"name\": \"payment\", \"timeout\": 15}, {\"name\": \"shipping\", \"timeout\": 20}]}"
+    },
+    "test_commands": ["python -c \"lines = open('result.txt').read().strip().split('\\n'); vals = [int(l) for l in lines]; assert vals == sorted(vals) and len(vals) == 6\""],
+    "expected_output": "2\n3\n5\n10\n15\n20\n30",
+    "difficulty": 0.4
+  },
+  {
+    "task_id": "info_04_multi_file_grep",
+    "task_type": "info_gathering",
+    "description": "Search all .py files in the project/ directory for functions that contain 'TODO' comments. List each function name and file path in result.txt.",
+    "initial_files": {
+      "project/utils.py": "def clean_data(df):\n    # TODO: handle missing values\n    return df.dropna()\n\ndef validate_email(email):\n    import re\n    return bool(re.match(r'^[\\w.-]+@[\\w.-]+\\.\\w+$', email))\n",
+      "project/api.py": "def fetch_users():\n    # TODO: add pagination\n    return requests.get('/api/users').json()\n\ndef create_user(data):\n    return requests.post('/api/users', json=data)\n",
+      "project/models.py": "class User:\n    def save(self):\n        # TODO: add validation before save\n        pass\n\n    def delete(self):\n        pass\n"
+    },
+    "test_commands": ["python -c \"content = open('result.txt').read(); assert 'clean_data' in content and 'fetch_users' in content and 'save' in content\""],
+    "expected_output": "project/utils.py: clean_data\nproject/api.py: fetch_users\nproject/models.py: User.save",
+    "difficulty": 0.35
+  },
+  {
+    "task_id": "info_05_data_pivot",
+    "task_type": "info_gathering",
+    "description": "Read employees.csv and create a summary showing the average salary by department and seniority level. Write the pivot table to result.txt.",
+    "initial_files": {
+      "employees.csv": "name,department,seniority,salary\nAlice,Engineering,Senior,150000\nBob,Engineering,Junior,85000\nCarol,Marketing,Senior,120000\nDave,Engineering,Mid,110000\nEve,Marketing,Junior,65000\nFrank,Sales,Senior,130000\nGrace,Sales,Mid,95000\nHank,Marketing,Mid,90000\nIvy,Engineering,Senior,145000\nJack,Sales,Junior,60000"
+    },
+    "test_commands": ["python -c \"content = open('result.txt').read(); assert 'Engineering' in content and 'Senior' in content\""],
+    "expected_output": null,
+    "difficulty": 0.4
+  },
+  {
+    "task_id": "debug_01_index_error",
+    "task_type": "code_debugging",
+    "description": "Fix the IndexError in processor.py. The process_batch function crashes when given a batch size that doesn't evenly divide the data length. Run the tests to verify.",
+    "initial_files": {
+      "processor.py": "def process_batch(data, batch_size):\n    results = []\n    for i in range(0, len(data), batch_size):\n        batch = data[i:i + batch_size]\n        # Bug: assumes all batches are full size\n        avg = sum(batch) / batch_size\n        results.append(avg)\n    return results\n",
+      "test_processor.py": "from processor import process_batch\n\ndef test_even_batches():\n    result = process_batch([1, 2, 3, 4], 2)\n    assert result == [1.5, 3.5]\n\ndef test_uneven_batches():\n    result = process_batch([1, 2, 3, 4, 5], 2)\n    assert len(result) == 3\n    assert result[-1] == 5.0\n\ndef test_single_element():\n    result = process_batch([42], 3)\n    assert result == [42.0]\n\ndef test_empty():\n    result = process_batch([], 5)\n    assert result == []\n"
+    },
+    "test_commands": ["python -m pytest test_processor.py -v"],
+    "expected_output": null,
+    "difficulty": 0.3
+  },
+  {
+    "task_id": "debug_02_off_by_one",
+    "task_type": "code_debugging",
+    "description": "Fix the off-by-one error in pagination.py that causes the last page to be missing. All tests in test_pagination.py must pass.",
+    "initial_files": {
+      "pagination.py": "def paginate(items, page_size):\n    if page_size <= 0:\n        raise ValueError('page_size must be positive')\n    total_pages = len(items) // page_size  # Bug: missing last partial page\n    pages = {}\n    for page_num in range(1, total_pages + 1):\n        start = (page_num - 1) * page_size\n        end = start + page_size\n        pages[page_num] = items[start:end]\n    return pages\n",
+      "test_pagination.py": "from pagination import paginate\n\ndef test_exact_division():\n    result = paginate([1, 2, 3, 4], 2)\n    assert len(result) == 2\n    assert result[1] == [1, 2]\n    assert result[2] == [3, 4]\n\ndef test_partial_last_page():\n    result = paginate([1, 2, 3, 4, 5], 2)\n    assert len(result) == 3\n    assert result[3] == [5]\n\ndef test_single_item_pages():\n    result = paginate([1, 2, 3], 1)\n    assert len(result) == 3\n\ndef test_one_big_page():\n    result = paginate([1, 2, 3], 10)\n    assert len(result) == 1\n    assert result[1] == [1, 2, 3]\n"
+    },
+    "test_commands": ["python -m pytest test_pagination.py -v"],
+    "expected_output": null,
+    "difficulty": 0.3
+  },
+  {
+    "task_id": "debug_03_recursion_bug",
+    "task_type": "code_debugging",
+    "description": "Fix the infinite recursion in tree.py. The flatten function enters an infinite loop on trees with shared subtrees. All tests must pass.",
+    "initial_files": {
+      "tree.py": "class TreeNode:\n    def __init__(self, value, children=None):\n        self.value = value\n        self.children = children or []\n\ndef flatten(node):\n    \"\"\"Return all values in the tree as a flat list (DFS pre-order).\"\"\"\n    result = [node.value]\n    for child in node.children:\n        result.extend(flatten(child))  # Bug: no visited tracking\n    return result\n",
+      "test_tree.py": "from tree import TreeNode, flatten\n\ndef test_simple_tree():\n    root = TreeNode(1, [TreeNode(2), TreeNode(3)])\n    assert flatten(root) == [1, 2, 3]\n\ndef test_deep_tree():\n    leaf = TreeNode(4)\n    mid = TreeNode(3, [leaf])\n    root = TreeNode(1, [TreeNode(2), mid])\n    assert flatten(root) == [1, 2, 3, 4]\n\ndef test_shared_subtree():\n    shared = TreeNode(99, [TreeNode(100)])\n    root = TreeNode(1, [shared, TreeNode(2, [shared])])\n    result = flatten(root)\n    assert 99 in result\n    assert 100 in result\n    # Should not infinite loop\n    assert len(result) <= 10\n"
+    },
+    "test_commands": ["python -m pytest test_tree.py -v --timeout=5"],
+    "expected_output": null,
+    "difficulty": 0.5
+  },
+  {
+    "task_id": "debug_04_type_coercion",
+    "task_type": "code_debugging",
+    "description": "Fix the type handling bugs in validator.py. The validate_config function fails on string numbers and boolean-like strings. All tests must pass.",
+    "initial_files": {
+      "validator.py": "def validate_config(config):\n    errors = []\n    # Port must be an integer between 1 and 65535\n    port = config.get('port')\n    if not isinstance(port, int) or port < 1 or port > 65535:\n        errors.append(f'Invalid port: {port}')\n\n    # Debug must be a boolean\n    debug = config.get('debug')\n    if not isinstance(debug, bool):\n        errors.append(f'Invalid debug flag: {debug}')\n\n    # Workers must be a positive integer\n    workers = config.get('workers')\n    if not isinstance(workers, int) or workers < 1:\n        errors.append(f'Invalid workers: {workers}')\n\n    return errors\n",
+      "test_validator.py": "from validator import validate_config\n\ndef test_valid_config():\n    assert validate_config({'port': 8080, 'debug': True, 'workers': 4}) == []\n\ndef test_string_port():\n    assert validate_config({'port': '8080', 'debug': False, 'workers': 2}) == []\n\ndef test_string_boolean():\n    assert validate_config({'port': 443, 'debug': 'true', 'workers': 1}) == []\n    assert validate_config({'port': 443, 'debug': 'false', 'workers': 1}) == []\n\ndef test_string_workers():\n    assert validate_config({'port': 80, 'debug': False, 'workers': '8'}) == []\n\ndef test_invalid_values():\n    errors = validate_config({'port': -1, 'debug': 'maybe', 'workers': 0})\n    assert len(errors) == 3\n\ndef test_missing_keys():\n    errors = validate_config({})\n    assert len(errors) == 3\n"
+    },
+    "test_commands": ["python -m pytest test_validator.py -v"],
+    "expected_output": null,
+    "difficulty": 0.45
+  },
+  {
+    "task_id": "debug_05_async_race",
+    "task_type": "code_debugging",
+    "description": "Fix the race condition in counter.py. The async increment function produces incorrect totals when called concurrently. All tests must pass.",
+    "initial_files": {
+      "counter.py": "import asyncio\n\nclass AsyncCounter:\n    def __init__(self):\n        self.value = 0\n\n    async def increment(self, amount=1):\n        current = self.value\n        await asyncio.sleep(0)  # Simulates async work\n        self.value = current + amount\n\n    async def bulk_increment(self, n, amount=1):\n        tasks = [self.increment(amount) for _ in range(n)]\n        await asyncio.gather(*tasks)\n",
+      "test_counter.py": "import asyncio\nfrom counter import AsyncCounter\n\ndef test_single_increment():\n    counter = AsyncCounter()\n    asyncio.run(counter.increment(5))\n    assert counter.value == 5\n\ndef test_sequential_increment():\n    async def run():\n        counter = AsyncCounter()\n        for _ in range(10):\n            await counter.increment()\n        return counter\n    counter = asyncio.run(run())\n    assert counter.value == 10\n\ndef test_concurrent_increment():\n    async def run():\n        counter = AsyncCounter()\n        await counter.bulk_increment(100)\n        return counter\n    counter = asyncio.run(run())\n    assert counter.value == 100\n\ndef test_concurrent_large_amount():\n    async def run():\n        counter = AsyncCounter()\n        await counter.bulk_increment(50, amount=3)\n        return counter\n    counter = asyncio.run(run())\n    assert counter.value == 150\n"
+    },
+    "test_commands": ["python -m pytest test_counter.py -v"],
+    "expected_output": null,
+    "difficulty": 0.55
+  },
+  {
+    "task_id": "api_01_rest_aggregate",
+    "task_type": "api_orchestration",
+    "description": "Use the provided API client to fetch all users from /api/users (paginated, 10 per page), then for each user fetch their orders from /api/users/{id}/orders. Compute total spend per user and write the top 5 spenders to result.json.",
+    "initial_files": {
+      "api_client.py": "import json\nfrom pathlib import Path\n\n_USERS = [\n    {'id': i, 'name': f'User_{i}', 'email': f'user{i}@example.com'}\n    for i in range(1, 26)\n]\n_ORDERS = {}\nfor uid in range(1, 26):\n    _ORDERS[uid] = [\n        {'order_id': uid * 100 + j, 'amount': round(10 + uid * 3.5 + j * 7.25, 2)}\n        for j in range(1, (uid % 5) + 2)\n    ]\n\ndef get(endpoint):\n    if endpoint.startswith('/api/users/') and endpoint.endswith('/orders'):\n        uid = int(endpoint.split('/')[3])\n        return {'orders': _ORDERS.get(uid, [])}\n    if endpoint.startswith('/api/users'):\n        parts = endpoint.split('?')\n        page = 1\n        if len(parts) > 1:\n            for param in parts[1].split('&'):\n                k, v = param.split('=')\n                if k == 'page':\n                    page = int(v)\n        start = (page - 1) * 10\n        return {'users': _USERS[start:start+10], 'total': len(_USERS), 'page': page}\n    return {'error': 'Not found'}\n"
+    },
+    "test_commands": ["python -c \"import json; data = json.load(open('result.json')); assert len(data) == 5; assert all('name' in u and 'total_spend' in u for u in data)\""],
+    "expected_output": null,
+    "difficulty": 0.5
+  },
+  {
+    "task_id": "api_02_data_join",
+    "task_type": "api_orchestration",
+    "description": "Join data from two API endpoints: /api/products returns product info, /api/inventory returns stock levels keyed by product_id. Create a merged report showing products with stock below 10 units. Write to result.json.",
+    "initial_files": {
+      "api_client.py": "def get(endpoint):\n    if endpoint == '/api/products':\n        return {'products': [\n            {'id': 1, 'name': 'Widget A', 'price': 9.99, 'category': 'widgets'},\n            {'id': 2, 'name': 'Widget B', 'price': 19.99, 'category': 'widgets'},\n            {'id': 3, 'name': 'Gadget X', 'price': 49.99, 'category': 'gadgets'},\n            {'id': 4, 'name': 'Gadget Y', 'price': 29.99, 'category': 'gadgets'},\n            {'id': 5, 'name': 'Doohickey', 'price': 4.99, 'category': 'misc'},\n        ]}\n    if endpoint == '/api/inventory':\n        return {'inventory': {\n            '1': {'stock': 5, 'warehouse': 'A'},\n            '2': {'stock': 150, 'warehouse': 'A'},\n            '3': {'stock': 3, 'warehouse': 'B'},\n            '4': {'stock': 45, 'warehouse': 'B'},\n            '5': {'stock': 0, 'warehouse': 'A'},\n        }}\n    return {'error': 'Not found'}\n"
+    },
+    "test_commands": ["python -c \"import json; data = json.load(open('result.json')); assert len(data) == 3; names = [d['name'] for d in data]; assert 'Widget A' in names and 'Doohickey' in names\""],
+    "expected_output": null,
+    "difficulty": 0.4
+  },
+  {
+    "task_id": "api_03_retry_logic",
+    "task_type": "api_orchestration",
+    "description": "Fetch data from /api/flaky which returns HTTP 500 errors 50% of the time. Implement retry logic (max 5 attempts with exponential backoff) to reliably get the data. Write the response to result.json.",
+    "initial_files": {
+      "api_client.py": "import random\nimport time\n\n_call_count = 0\n\ndef get(endpoint):\n    global _call_count\n    _call_count += 1\n    if endpoint == '/api/flaky':\n        if _call_count % 2 == 1:\n            raise ConnectionError('Server returned 500')\n        return {'data': {'status': 'success', 'value': 42, 'timestamp': '2024-01-15T10:00:00Z'}}\n    return {'error': 'Not found'}\n\ndef get_call_count():\n    return _call_count\n"
+    },
+    "test_commands": ["python -c \"import json; data = json.load(open('result.json')); assert data['status'] == 'success' and data['value'] == 42\""],
+    "expected_output": null,
+    "difficulty": 0.35
+  },
+  {
+    "task_id": "api_04_transform_pipeline",
+    "task_type": "api_orchestration",
+    "description": "Build a data pipeline: (1) fetch raw sensor readings from /api/sensors, (2) fetch calibration offsets from /api/calibration, (3) apply offsets to readings, (4) compute 5-minute rolling averages, (5) write processed data to result.json.",
+    "initial_files": {
+      "api_client.py": "def get(endpoint):\n    if endpoint == '/api/sensors':\n        return {'readings': [\n            {'sensor_id': 'temp_1', 'timestamp': f'2024-01-15T10:{m:02d}:00Z', 'value': 20.0 + m * 0.1 + (m % 3) * 0.5}\n            for m in range(20)\n        ]}\n    if endpoint == '/api/calibration':\n        return {'offsets': {'temp_1': -0.5}}\n    return {'error': 'Not found'}\n"
+    },
+    "test_commands": ["python -c \"import json; data = json.load(open('result.json')); assert len(data) > 0; assert all('rolling_avg' in d for d in data)\""],
+    "expected_output": null,
+    "difficulty": 0.55
+  },
+  {
+    "task_id": "api_05_dependency_chain",
+    "task_type": "api_orchestration",
+    "description": "Resolve a dependency chain: fetch /api/packages/app to get its dependencies, then recursively fetch each dependency's own dependencies. Build a full dependency tree (detecting cycles) and write it to result.json.",
+    "initial_files": {
+      "api_client.py": "def get(endpoint):\n    packages = {\n        '/api/packages/app': {'name': 'app', 'version': '1.0', 'dependencies': ['lib-a', 'lib-b']},\n        '/api/packages/lib-a': {'name': 'lib-a', 'version': '2.1', 'dependencies': ['lib-c', 'lib-d']},\n        '/api/packages/lib-b': {'name': 'lib-b', 'version': '1.3', 'dependencies': ['lib-c']},\n        '/api/packages/lib-c': {'name': 'lib-c', 'version': '3.0', 'dependencies': ['lib-d']},\n        '/api/packages/lib-d': {'name': 'lib-d', 'version': '1.0', 'dependencies': []},\n    }\n    return packages.get(endpoint, {'error': 'Package not found'})\n"
+    },
+    "test_commands": ["python -c \"import json; tree = json.load(open('result.json')); assert tree['name'] == 'app'; assert len(tree['dependencies']) == 2\""],
+    "expected_output": null,
+    "difficulty": 0.5
+  },
+  {
+    "task_id": "opt_01_sort_performance",
+    "task_type": "open_ended_optimization",
+    "description": "The sort function in slow_sort.py is too slow for large inputs. Optimize it to handle 100,000 elements in under 1 second. Current implementation uses bubble sort. The tests verify correctness and performance.",
+    "initial_files": {
+      "slow_sort.py": "def custom_sort(data):\n    \"\"\"Sort a list of integers in ascending order.\"\"\"\n    arr = list(data)\n    n = len(arr)\n    for i in range(n):\n        for j in range(0, n - i - 1):\n            if arr[j] > arr[j + 1]:\n                arr[j], arr[j + 1] = arr[j + 1], arr[j]\n    return arr\n",
+      "test_sort.py": "import time\nimport random\nfrom slow_sort import custom_sort\n\ndef test_correctness_small():\n    assert custom_sort([3, 1, 2]) == [1, 2, 3]\n    assert custom_sort([]) == []\n    assert custom_sort([1]) == [1]\n    assert custom_sort([5, 3, 8, 1, 2]) == [1, 2, 3, 5, 8]\n\ndef test_correctness_duplicates():\n    assert custom_sort([3, 1, 3, 2, 1]) == [1, 1, 2, 3, 3]\n\ndef test_correctness_negative():\n    assert custom_sort([-1, 5, -3, 0, 2]) == [-3, -1, 0, 2, 5]\n\ndef test_performance():\n    data = list(range(100000, 0, -1))\n    start = time.time()\n    result = custom_sort(data)\n    elapsed = time.time() - start\n    assert result == sorted(data)\n    assert elapsed < 1.0, f'Too slow: {elapsed:.2f}s'\n"
+    },
+    "test_commands": ["python -m pytest test_sort.py -v"],
+    "expected_output": null,
+    "difficulty": 0.3
+  },
+  {
+    "task_id": "opt_02_memory_efficiency",
+    "task_type": "open_ended_optimization",
+    "description": "Optimize the file deduplication in dedup.py. Current implementation loads all file contents into memory. Make it work on directories with files totaling >1GB by using hashing instead of full content comparison.",
+    "initial_files": {
+      "dedup.py": "import os\n\ndef find_duplicates(directory):\n    \"\"\"Find duplicate files in a directory. Returns list of (original, duplicate) pairs.\"\"\"\n    contents = {}\n    duplicates = []\n    for root, dirs, files in os.walk(directory):\n        for fname in files:\n            path = os.path.join(root, fname)\n            with open(path, 'rb') as f:\n                data = f.read()  # Bug: loads entire file into memory\n            if data in contents:\n                duplicates.append((contents[data], path))\n            else:\n                contents[data] = path\n    return duplicates\n",
+      "test_dedup.py": "import os\nimport tempfile\nfrom dedup import find_duplicates\n\ndef test_no_duplicates():\n    with tempfile.TemporaryDirectory() as d:\n        for i in range(5):\n            with open(os.path.join(d, f'file{i}.txt'), 'w') as f:\n                f.write(f'unique content {i}')\n        assert find_duplicates(d) == []\n\ndef test_finds_duplicates():\n    with tempfile.TemporaryDirectory() as d:\n        for name in ['a.txt', 'b.txt']:\n            with open(os.path.join(d, name), 'w') as f:\n                f.write('same content')\n        with open(os.path.join(d, 'c.txt'), 'w') as f:\n            f.write('different')\n        dupes = find_duplicates(d)\n        assert len(dupes) == 1\n\ndef test_empty_directory():\n    with tempfile.TemporaryDirectory() as d:\n        assert find_duplicates(d) == []\n\ndef test_large_file_efficiency():\n    \"\"\"Verify the function uses hashing, not full content storage.\"\"\"\n    import inspect\n    source = inspect.getsource(find_duplicates)\n    assert 'hashlib' in source or 'hash' in source.lower(), 'Should use hashing for memory efficiency'\n"
+    },
+    "test_commands": ["python -m pytest test_dedup.py -v"],
+    "expected_output": null,
+    "difficulty": 0.4
+  },
+  {
+    "task_id": "opt_03_query_optimization",
+    "task_type": "open_ended_optimization",
+    "description": "Optimize the search function in search.py. It currently does a linear scan over all records for every query. Add an index structure so repeated queries are fast. All tests must pass.",
+    "initial_files": {
+      "search.py": "class RecordStore:\n    def __init__(self):\n        self.records = []\n\n    def add(self, record):\n        \"\"\"Add a record dict to the store.\"\"\"\n        self.records.append(record)\n\n    def search(self, field, value):\n        \"\"\"Find all records where record[field] == value.\"\"\"\n        return [r for r in self.records if r.get(field) == value]\n\n    def count(self, field, value):\n        \"\"\"Count records where record[field] == value.\"\"\"\n        return len(self.search(field, value))\n",
+      "test_search.py": "import time\nfrom search import RecordStore\n\ndef test_basic_search():\n    store = RecordStore()\n    store.add({'name': 'Alice', 'dept': 'Eng'})\n    store.add({'name': 'Bob', 'dept': 'Sales'})\n    store.add({'name': 'Carol', 'dept': 'Eng'})\n    assert len(store.search('dept', 'Eng')) == 2\n    assert store.count('dept', 'Sales') == 1\n\ndef test_search_performance():\n    store = RecordStore()\n    for i in range(100000):\n        store.add({'id': i, 'category': f'cat_{i % 100}', 'value': i * 1.5})\n\n    start = time.time()\n    for _ in range(1000):\n        store.search('category', 'cat_42')\n    elapsed = time.time() - start\n    assert elapsed < 1.0, f'Search too slow: {elapsed:.2f}s for 1000 queries'\n\ndef test_count_performance():\n    store = RecordStore()\n    for i in range(50000):\n        store.add({'type': f'type_{i % 10}'})\n    start = time.time()\n    for _ in range(500):\n        store.count('type', 'type_5')\n    elapsed = time.time() - start\n    assert elapsed < 1.0, f'Count too slow: {elapsed:.2f}s'\n"
+    },
+    "test_commands": ["python -m pytest test_search.py -v"],
+    "expected_output": null,
+    "difficulty": 0.5
+  },
+  {
+    "task_id": "opt_04_parallel_processing",
+    "task_type": "open_ended_optimization",
+    "description": "Optimize the image processor in image_proc.py. The current sequential implementation is too slow for batch processing. Parallelise it while keeping results in order. All tests must pass.",
+    "initial_files": {
+      "image_proc.py": "import time\n\ndef process_image(image_data):\n    \"\"\"Simulate CPU-intensive image processing.\"\"\"\n    time.sleep(0.05)  # Simulates processing time\n    return {'size': len(image_data), 'checksum': sum(image_data) % 65536}\n\ndef batch_process(images):\n    \"\"\"Process a batch of images. Returns results in same order as input.\"\"\"\n    results = []\n    for img in images:\n        results.append(process_image(img))\n    return results\n",
+      "test_image_proc.py": "import time\nfrom image_proc import batch_process\n\ndef test_correctness():\n    images = [bytes([i] * 100) for i in range(5)]\n    results = batch_process(images)\n    assert len(results) == 5\n    assert all('size' in r and 'checksum' in r for r in results)\n    assert results[0]['size'] == 100\n\ndef test_order_preserved():\n    images = [bytes([i] * 50) for i in range(10)]\n    results = batch_process(images)\n    checksums = [r['checksum'] for r in results]\n    # Each image has different content, so checksums should differ\n    assert len(set(checksums)) > 1\n\ndef test_performance():\n    images = [bytes([i % 256] * 200) for i in range(40)]\n    start = time.time()\n    results = batch_process(images)\n    elapsed = time.time() - start\n    assert len(results) == 40\n    # Sequential would take 40 * 0.05 = 2.0s; parallel should be much faster\n    assert elapsed < 1.0, f'Too slow: {elapsed:.2f}s (should be <1.0s with parallelism)'\n"
+    },
+    "test_commands": ["python -m pytest test_image_proc.py -v"],
+    "expected_output": null,
+    "difficulty": 0.45
+  },
+  {
+    "task_id": "opt_05_cache_strategy",
+    "task_type": "open_ended_optimization",
+    "description": "Add caching to the expensive computation in compute.py. The fibonacci function is called repeatedly with the same inputs. Implement memoization that also respects a configurable cache size limit. All tests must pass.",
+    "initial_files": {
+      "compute.py": "def fibonacci(n):\n    \"\"\"Compute the nth Fibonacci number (0-indexed).\"\"\"\n    if n <= 1:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)\n\ndef batch_fibonacci(numbers):\n    \"\"\"Compute Fibonacci for a list of inputs.\"\"\"\n    return [fibonacci(n) for n in numbers]\n",
+      "test_compute.py": "import time\nfrom compute import fibonacci, batch_fibonacci\n\ndef test_correctness():\n    assert fibonacci(0) == 0\n    assert fibonacci(1) == 1\n    assert fibonacci(10) == 55\n    assert fibonacci(20) == 6765\n\ndef test_large_input():\n    start = time.time()\n    result = fibonacci(35)\n    elapsed = time.time() - start\n    assert result == 9227465\n    assert elapsed < 1.0, f'fibonacci(35) too slow: {elapsed:.2f}s'\n\ndef test_batch():\n    start = time.time()\n    results = batch_fibonacci([30, 35, 30, 35, 25, 35])\n    elapsed = time.time() - start\n    assert results[0] == results[2]  # Same input, same output\n    assert elapsed < 1.0, f'Batch too slow: {elapsed:.2f}s'\n\ndef test_very_large():\n    start = time.time()\n    result = fibonacci(100)\n    elapsed = time.time() - start\n    assert result == 354224848179261915075\n    assert elapsed < 1.0\n"
+    },
+    "test_commands": ["python -m pytest test_compute.py -v"],
+    "expected_output": null,
+    "difficulty": 0.35
+  }
+]
