@@ -13,6 +13,6 @@ loop1:
   max_prompt_length: 4000
   seed_prompt_path: "./data/prompts/seed.json"
   # DSPy GEPA integration (set to false to use custom engine)
-  use_dspy_gepa: true
+  use_dspy_gepa: false
   dspy_num_threads: 4
   dspy_max_metric_calls: 150
