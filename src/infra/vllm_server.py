@@ -1,17 +1,20 @@
-"""vLLM server lifecycle management and OpenAI-compatible inference client."""
+"""LLM server lifecycle management via Ollama with OpenAI-compatible client.
+
+Ollama runs natively on Windows, serves GGUF-quantized models, and exposes
+an OpenAI-compatible API at localhost:11434/v1. This replaces vLLM for our
+setup since vLLM doesn't support Windows natively.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 import subprocess
 import sys
 import time
 from enum import Enum
-from pathlib import Path
 from types import TracebackType
-from typing import Any, Sequence
+from typing import Any
 
 import openai
 
@@ -27,29 +30,26 @@ class ServerStatus(str, Enum):
     STOPPING = "stopping"
 
 
-class VLLMServer:
-    """Manages a vLLM subprocess and exposes an async OpenAI-compatible client."""
+class LLMServer:
+    """Manages Ollama model serving and exposes an async OpenAI-compatible client.
+
+    Ollama runs as a background service on Windows. This class ensures the
+    model is loaded and provides chat_completion / generate methods that
+    the rest of the codebase uses.
+    """
 
     def __init__(
         self,
         config: ModelConfig,
         *,
-        log_dir: str | Path = "./logs",
         health_poll_interval: float = 2.0,
         health_timeout: float = 300.0,
-        shutdown_grace_seconds: float = 15.0,
-        extra_vllm_args: Sequence[str] = (),
     ) -> None:
         self.config = config
-        self.log_dir = Path(log_dir)
         self.health_poll_interval = health_poll_interval
         self.health_timeout = health_timeout
-        self.shutdown_grace_seconds = shutdown_grace_seconds
-        self.extra_vllm_args = list(extra_vllm_args)
 
-        self._process: subprocess.Popen[bytes] | None = None
         self._status: ServerStatus = ServerStatus.STOPPED
-        self._log_file_path: Path | None = None
         self._client: openai.AsyncOpenAI | None = None
 
     # ------------------------------------------------------------------
@@ -62,100 +62,76 @@ class VLLMServer:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.config.vllm_host}:{self.config.vllm_port}/v1"
+        return f"http://{self.config.ollama_host}:{self.config.ollama_port}/v1"
 
     @property
-    def health_url(self) -> str:
-        return f"http://{self.config.vllm_host}:{self.config.vllm_port}/health"
+    def api_url(self) -> str:
+        return f"http://{self.config.ollama_host}:{self.config.ollama_port}/api"
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Launch vLLM as a subprocess and wait until it is healthy."""
+        """Ensure Ollama is running and the model is loaded."""
         if self._status in (ServerStatus.STARTING, ServerStatus.READY):
-            logger.warning("vLLM server is already %s", self._status.value)
+            logger.warning("LLM server is already %s", self._status.value)
             return
 
         self._status = ServerStatus.STARTING
-        logger.info(
-            "Starting vLLM server: model=%s quant=%s port=%d gpu_mem=%.2f",
-            self.config.name,
-            self.config.quantization,
-            self.config.vllm_port,
-            self.config.vllm_gpu_memory_utilization,
-        )
+        logger.info("Starting LLM server: model=%s", self.config.name)
 
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._log_file_path = self.log_dir / f"vllm_{int(time.time())}.log"
+        # 1. Check if Ollama service is reachable
+        await self._ensure_ollama_running()
 
-        cmd = self._build_command()
-        logger.info("vLLM command: %s", " ".join(cmd))
+        # 2. Ensure model is pulled
+        await self._ensure_model_available()
 
-        log_fh = open(self._log_file_path, "wb")  # noqa: SIM115
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            # On Windows SIGTERM is not available; we rely on terminate().
-            creationflags=(
-                subprocess.CREATE_NEW_PROCESS_GROUP
-                if sys.platform == "win32"
-                else 0
-            ),
-        )
+        # 3. Warm up the model by loading it into GPU memory
+        await self._warmup_model()
 
-        try:
-            await self._wait_for_healthy()
-        except Exception:
-            logger.error("vLLM failed to become healthy; shutting down process")
-            await self.stop()
-            raise
-
+        # 4. Create OpenAI-compatible client
         self._client = openai.AsyncOpenAI(
             base_url=self.base_url,
-            api_key="unused",  # vLLM does not require a key
+            api_key="ollama",  # Ollama ignores this but openai lib requires it
         )
+
         self._status = ServerStatus.READY
-        logger.info("vLLM server is ready at %s", self.base_url)
+        logger.info("LLM server is ready: model=%s at %s", self.config.name, self.base_url)
 
     async def stop(self) -> None:
-        """Gracefully stop the vLLM process (SIGTERM then SIGKILL)."""
-        if self._process is None or self._status == ServerStatus.STOPPED:
-            self._status = ServerStatus.STOPPED
+        """Unload the model from GPU memory."""
+        if self._status == ServerStatus.STOPPED:
             return
 
         self._status = ServerStatus.STOPPING
-        logger.info("Stopping vLLM server (pid=%d) ...", self._process.pid)
+        logger.info("Unloading model %s from Ollama ...", self.config.name)
 
-        # Attempt graceful termination.
-        self._process.terminate()
         try:
-            await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, self._process.wait),
-                timeout=self.shutdown_grace_seconds,
-            )
-            logger.info("vLLM process terminated gracefully")
-        except asyncio.TimeoutError:
-            logger.warning(
-                "vLLM did not exit within %.0fs; sending SIGKILL",
-                self.shutdown_grace_seconds,
-            )
-            self._process.kill()
-            await asyncio.get_event_loop().run_in_executor(None, self._process.wait)
-            logger.info("vLLM process killed")
+            # Ollama API: POST /api/generate with keep_alive=0 unloads the model
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.api_url}/generate",
+                    json={"model": self.config.name, "keep_alive": 0},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info("Model unloaded from GPU")
+                    else:
+                        logger.warning("Model unload returned status %d", resp.status)
+        except Exception as e:
+            logger.warning("Failed to unload model: %s", e)
 
-        self._process = None
         self._client = None
         self._status = ServerStatus.STOPPED
-        logger.info("vLLM server stopped")
+        logger.info("LLM server stopped")
 
     # ------------------------------------------------------------------
     # Async context manager
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> VLLMServer:
+    async def __aenter__(self) -> LLMServer:
         await self.start()
         return self
 
@@ -181,7 +157,7 @@ class VLLMServer:
         top_p: float = 1.0,
         **kwargs: Any,
     ) -> openai.types.chat.ChatCompletion:
-        """Send a chat-completion request to the local vLLM server."""
+        """Send a chat-completion request to the local Ollama server."""
         self._ensure_ready()
         assert self._client is not None
         return await self._client.chat.completions.create(
@@ -204,7 +180,7 @@ class VLLMServer:
         top_p: float = 1.0,
         **kwargs: Any,
     ) -> openai.types.Completion:
-        """Send a raw (non-chat) completion request to the local vLLM server."""
+        """Send a raw completion request to the local Ollama server."""
         self._ensure_ready()
         assert self._client is not None
         return await self._client.completions.create(
@@ -221,52 +197,123 @@ class VLLMServer:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_command(self) -> list[str]:
-        cmd = [
-            sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-            "--model", self.config.name,
-            "--port", str(self.config.vllm_port),
-            "--host", self.config.vllm_host,
-            "--gpu-memory-utilization", str(self.config.vllm_gpu_memory_utilization),
-        ]
-        if self.config.quantization:
-            cmd += ["--quantization", self.config.quantization]
-        cmd.extend(self.extra_vllm_args)
-        return cmd
-
-    async def _wait_for_healthy(self) -> None:
-        """Poll the /health endpoint until vLLM reports ready."""
+    async def _ensure_ollama_running(self) -> None:
+        """Check that the Ollama service is reachable, start it if not."""
         import aiohttp
 
-        deadline = time.monotonic() + self.health_timeout
-        logger.info("Waiting up to %.0fs for vLLM health check ...", self.health_timeout)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://{self.config.ollama_host}:{self.config.ollama_port}/",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info("Ollama service is running")
+                        return
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
 
+        # Try to start Ollama service
+        logger.info("Ollama not reachable, attempting to start ...")
+        if sys.platform == "win32":
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        else:
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        # Wait for it to come up
+        deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
-            # If the subprocess exited, abort early.
-            if self._process is not None and self._process.poll() is not None:
-                raise RuntimeError(
-                    f"vLLM process exited with code {self._process.returncode} "
-                    f"before becoming healthy. See logs at {self._log_file_path}"
-                )
-
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(self.health_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    async with session.get(
+                        f"http://{self.config.ollama_host}:{self.config.ollama_port}/",
+                        timeout=aiohttp.ClientTimeout(total=3),
+                    ) as resp:
                         if resp.status == 200:
+                            logger.info("Ollama service started")
                             return
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
+            await asyncio.sleep(1.0)
 
-            await asyncio.sleep(self.health_poll_interval)
+        raise RuntimeError("Failed to start Ollama service within 30s")
 
-        raise TimeoutError(
-            f"vLLM server did not become healthy within {self.health_timeout}s. "
-            f"See logs at {self._log_file_path}"
+    async def _ensure_model_available(self) -> None:
+        """Check if the model is pulled, pull it if not."""
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            # Check local models
+            async with session.get(
+                f"{self.api_url}/tags",
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    model_names = [m.get("name", "") for m in data.get("models", [])]
+                    # Check if our model is in the list (handle tag variations)
+                    model_base = self.config.name.split(":")[0]
+                    for name in model_names:
+                        if model_base in name:
+                            logger.info("Model %s is already available locally", self.config.name)
+                            return
+
+        logger.info("Model %s not found locally, pulling ...", self.config.name)
+        proc = await asyncio.create_subprocess_exec(
+            "ollama", "pull", self.config.name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Failed to pull model {self.config.name}: {stdout.decode()}"
+            )
+        logger.info("Model %s pulled successfully", self.config.name)
+
+    async def _warmup_model(self) -> None:
+        """Load the model into GPU memory with a dummy request."""
+        import aiohttp
+
+        logger.info("Warming up model %s (loading into GPU) ...", self.config.name)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.api_url}/generate",
+                    json={
+                        "model": self.config.name,
+                        "prompt": "Hello",
+                        "stream": False,
+                        "options": {"num_predict": 1},
+                    },
+                    timeout=aiohttp.ClientTimeout(total=self.health_timeout),
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info("Model loaded into GPU memory")
+                    else:
+                        text = await resp.text()
+                        raise RuntimeError(f"Warmup failed (status={resp.status}): {text}")
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                f"Model warmup timed out after {self.health_timeout}s"
+            )
 
     def _ensure_ready(self) -> None:
         if self._status != ServerStatus.READY:
             raise RuntimeError(
-                f"vLLM server is not ready (status={self._status.value}). "
+                f"LLM server is not ready (status={self._status.value}). "
                 "Call start() first or use the async context manager."
             )
+
+
+# Backward-compatible alias
+VLLMServer = LLMServer

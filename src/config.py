@@ -11,10 +11,13 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    name: str = "Qwen/Qwen3.5-27B"
-    quantization: str = "awq"
+    name: str = "huihui_ai/qwen3.5-abliterated:27b"
+    quantization: str = ""  # Ollama handles quantization internally (Q4_K_M)
+    ollama_port: int = 11434
+    ollama_host: str = "localhost"
+    # Legacy vLLM fields (kept for backward compat)
     vllm_gpu_memory_utilization: float = 0.50
-    vllm_port: int = 8000
+    vllm_port: int = 11434
     vllm_host: str = "localhost"
 
 

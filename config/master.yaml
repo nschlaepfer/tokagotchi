@@ -1,9 +1,8 @@
 model:
-  name: "Qwen/Qwen3.5-27B"
-  quantization: "awq"
-  vllm_gpu_memory_utilization: 0.50
-  vllm_port: 8000
-  vllm_host: "localhost"
+  name: "huihui_ai/qwen3.5-abliterated:27b"
+  quantization: ""
+  ollama_port: 11434
+  ollama_host: "localhost"
 
 opus:
   daily_budget_usd: 50.0
