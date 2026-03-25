@@ -11,10 +11,15 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    name: str = "huihui_ai/qwen3.5-abliterated:27b"
+    # Ollama model for inference (Loop 1 rollouts, arena episodes)
+    name: str = "huihui_ai/qwen3.5-abliterated:9b"
     quantization: str = ""  # Ollama handles quantization internally (Q4_K_M)
     ollama_port: int = 11434
     ollama_host: str = "localhost"
+    # HuggingFace model for training (Loop 2 SFT, Loop 3 RL)
+    hf_model_path: str = "models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated"
+    # Scale-up model (noted for later)
+    hf_model_path_27b: str = "huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated"
     # Legacy vLLM fields (kept for backward compat)
     vllm_gpu_memory_utilization: float = 0.50
     vllm_port: int = 11434

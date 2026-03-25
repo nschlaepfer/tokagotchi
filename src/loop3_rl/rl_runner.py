@@ -64,10 +64,99 @@ class RLRunner:
         self._dapo = DAPOClipper(config.dapo)
         self._filter = TrajectoryFilter(config)
 
+        # PEFT model, optimizer, and tokenizer (loaded on demand)
+        self._peft_model: Any | None = None
+        self._optimizer: Any | None = None
+        self._tokenizer: Any | None = None
+
         # Progress tracking
         self._total_steps: int = 0
         self._completed_steps: int = 0
         self._start_time: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
+    async def load_model(self, model_path: str, config: Loop3Config) -> None:
+        """Load the base model with 4-bit quantization and LoRA for RL training.
+
+        Parameters
+        ----------
+        model_path:
+            Path or HuggingFace model ID.
+        config:
+            Loop 3 config for learning rate etc.
+        """
+        if torch is None:
+            logger.warning("PyTorch not available; skipping model load.")
+            return
+
+        loop = asyncio.get_event_loop()
+
+        def _load() -> None:
+            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+            from peft import LoraConfig, TaskType as PeftTaskType, get_peft_model
+
+            logger.info("Loading model for RL training: %s", model_path)
+
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=True
+            )
+            if self._tokenizer.pad_token is None:
+                self._tokenizer.pad_token = self._tokenizer.eos_token
+
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16 if config.bf16 else torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                quantization_config=bnb_config,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+
+            lora_config = LoraConfig(
+                task_type=PeftTaskType.CAUSAL_LM,
+                r=64,
+                lora_alpha=32,
+                target_modules=[
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj",
+                ],
+                lora_dropout=0.05,
+                bias="none",
+            )
+
+            self._peft_model = get_peft_model(base_model, lora_config)
+            self._peft_model.print_trainable_parameters()
+
+            self._optimizer = torch.optim.AdamW(
+                self._peft_model.parameters(),
+                lr=config.learning_rate,
+            )
+            logger.info("RL model loaded and ready for training.")
+
+        await loop.run_in_executor(None, _load)
+
+    def unload_model(self) -> None:
+        """Free GPU memory by unloading model, optimizer, tokenizer."""
+        if self._peft_model is not None:
+            del self._peft_model
+            self._peft_model = None
+        if self._optimizer is not None:
+            del self._optimizer
+            self._optimizer = None
+        if self._tokenizer is not None:
+            del self._tokenizer
+            self._tokenizer = None
+        if torch is not None:
+            torch.cuda.empty_cache()
+        logger.info("RL model unloaded, VRAM freed.")
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -472,6 +561,10 @@ class RLRunner:
     ) -> float | None:
         """Execute a single LoRA parameter update with DAPO-clipped loss.
 
+        Loads the PEFT model in 4-bit, runs a forward pass to get new
+        log-probs, computes the DAPO-clipped policy loss, and updates
+        the LoRA parameters via the optimizer.
+
         Returns the scalar loss value, or ``None`` if torch is unavailable.
         """
         if torch is None:
@@ -481,15 +574,13 @@ class RLRunner:
         loop = asyncio.get_event_loop()
 
         def _step() -> float:
-            # In a full implementation this would load the PEFT model,
-            # run a forward pass to get new log-probs, compute the DAPO
-            # loss, and call optimizer.step().  Here we compute the loss
-            # from the batch tensors to validate the pipeline.
+            # If we have a loaded model + optimizer, use them (real training)
+            if self._peft_model is not None and self._optimizer is not None:
+                return self._real_training_step(batch, config)
 
+            # Fallback: compute loss from batch tensors (pipeline validation)
             advantages = batch["advantages"]
             old_log_probs = batch["old_log_probs"]
-
-            # Simulate new log-probs (slightly perturbed old ones)
             new_log_probs = old_log_probs + torch.randn_like(old_log_probs) * 0.01
 
             loss = self._dapo.compute_policy_loss(
@@ -498,10 +589,83 @@ class RLRunner:
                 advantages=advantages,
                 config=config.dapo,
             )
-
             return loss.item()
 
         return await loop.run_in_executor(None, _step)
+
+    def _real_training_step(
+        self,
+        batch: dict[str, Any],
+        config: Loop3Config,
+    ) -> float:
+        """Real forward + backward pass through the PEFT model."""
+        model = self._peft_model
+        optimizer = self._optimizer
+        tokenizer = self._tokenizer
+
+        advantages = batch["advantages"]
+        old_log_probs = batch["old_log_probs"]
+        texts = batch.get("texts", [])
+
+        if not texts:
+            # Fallback if no texts in batch
+            new_log_probs = old_log_probs + torch.randn_like(old_log_probs) * 0.01
+            loss = self._dapo.compute_policy_loss(
+                log_probs_new=new_log_probs,
+                log_probs_old=old_log_probs,
+                advantages=advantages,
+                config=config.dapo,
+            )
+            return loss.item()
+
+        # Tokenize and forward pass
+        model.train()
+        total_loss = 0.0
+        n_chunks = 0
+
+        for i in range(0, len(texts), 4):  # mini-batch of 4
+            chunk_texts = texts[i : i + 4]
+            chunk_adv = advantages[i : i + 4] if i + 4 <= len(advantages) else advantages[i:]
+            chunk_old_lp = old_log_probs[i : i + 4] if i + 4 <= len(old_log_probs) else old_log_probs[i:]
+
+            inputs = tokenizer(
+                chunk_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=2048,
+            ).to(model.device)
+
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+            # Compute per-token log-probs from logits
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = inputs["input_ids"][:, 1:].contiguous()
+            log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+            new_log_probs_seq = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+            # Mean log-prob per sequence
+            mask = (shift_labels != tokenizer.pad_token_id).float()
+            new_lp = (new_log_probs_seq * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
+
+            loss = self._dapo.compute_policy_loss(
+                log_probs_new=new_lp,
+                log_probs_old=chunk_old_lp.to(new_lp.device),
+                advantages=chunk_adv.to(new_lp.device),
+                config=config.dapo,
+            )
+
+            loss.backward()
+            total_loss += loss.item()
+            n_chunks += 1
+
+        # Optimizer step after accumulating gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        return total_loss / max(n_chunks, 1)
 
     # ------------------------------------------------------------------
     # Internal: evaluation

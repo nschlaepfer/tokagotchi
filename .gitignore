@@ -48,6 +48,9 @@ data/experiments/
 # Docker arena temp files
 docker/*.tar
 
+# Conversion working files
+data/conversion/
+
 # Secrets / API keys
 .env
 .env.*
