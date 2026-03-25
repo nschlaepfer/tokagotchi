@@ -353,7 +353,7 @@ class MasterLoop:
         # Sample tasks from curriculum
         if self.curriculum is None:
             return
-        tasks = self.curriculum.sample(n=5)
+        tasks = self.curriculum.sample_tasks(batch_size=5)
         if not tasks:
             return
 
@@ -386,6 +386,11 @@ class MasterLoop:
         assert self.vram_scheduler is not None
         self._loop_status["loop3_rl"] = "waiting"
         logger.info("Loop 3 (RL) started — waiting for overnight window")
+
+        # Wait for Loop 1 to finish initial population + at least one GEPA cycle
+        # before stealing the GPU for RL training
+        logger.info("Loop 3: waiting 5 minutes for Loop 1/2 to collect initial data...")
+        await asyncio.sleep(300)
 
         try:
             while not self._shutdown_event.is_set():
