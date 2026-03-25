@@ -155,12 +155,35 @@ class LLMServer:
         max_tokens: int = 2048,
         stop: str | list[str] | None = None,
         top_p: float = 1.0,
+        think: bool = False,
         **kwargs: Any,
     ) -> openai.types.chat.ChatCompletion:
-        """Send a chat-completion request to the local Ollama server."""
+        """Send a chat-completion request to the local Ollama server.
+
+        Parameters
+        ----------
+        think:
+            If False (default), disables Qwen 3.5's thinking mode via the
+            native Ollama API so responses appear in the ``content`` field.
+            If True, uses the OpenAI-compatible endpoint and content may be
+            in the ``reasoning`` field instead.
+        """
         self._ensure_ready()
+
+        if not think:
+            # Use native Ollama API with think=false for direct responses
+            result = await self._native_chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                think=False,
+            )
+            # Wrap in a ChatCompletion-like response for compatibility
+            return _wrap_native_response(result)
+
         assert self._client is not None
-        return await self._client.chat.completions.create(
+        response = await self._client.chat.completions.create(
             model=self.config.name,
             messages=messages,  # type: ignore[arg-type]
             temperature=temperature,
@@ -169,6 +192,28 @@ class LLMServer:
             top_p=top_p,
             **kwargs,
         )
+        # Fix thinking model responses: extract reasoning if content is empty
+        _fix_thinking_response(response)
+        return response
+
+    async def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        top_p: float = 1.0,
+        think: bool = False,
+    ) -> str:
+        """Convenience: send a chat request and return the text content."""
+        resp = await self.chat_completion(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            think=think,
+        )
+        return resp.choices[0].message.content or ""
 
     async def generate(
         self,
@@ -192,6 +237,41 @@ class LLMServer:
             top_p=top_p,
             **kwargs,
         )
+
+    async def _native_chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        top_p: float = 1.0,
+        think: bool = False,
+    ) -> dict[str, Any]:
+        """Call the native Ollama /api/chat endpoint (supports think param)."""
+        import aiohttp
+
+        payload: dict[str, Any] = {
+            "model": self.config.name,
+            "messages": messages,
+            "stream": False,
+            "think": think,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "top_p": top_p,
+            },
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.api_url}/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"Ollama /api/chat failed ({resp.status}): {text}")
+                return await resp.json()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -317,3 +397,63 @@ class LLMServer:
 
 # Backward-compatible alias
 VLLMServer = LLMServer
+
+
+# ---------------------------------------------------------------------------
+# Thinking-model response helpers
+# ---------------------------------------------------------------------------
+
+
+def _fix_thinking_response(response: openai.types.chat.ChatCompletion) -> None:
+    """Fix responses from thinking models (Qwen 3.5) where content is empty.
+
+    When Qwen 3.5 uses thinking mode via the OpenAI-compatible API, the actual
+    response text goes into the ``reasoning`` field and ``content`` is empty.
+    This function moves reasoning into content when content is empty.
+    """
+    for choice in response.choices:
+        msg = choice.message
+        content = msg.content or ""
+        reasoning = getattr(msg, "reasoning", None) or ""
+
+        if not content.strip() and reasoning.strip():
+            # Extract the actual answer from reasoning (after thinking)
+            # Qwen often wraps thinking in <think> tags
+            import re
+            # Try to get text after </think> tag
+            match = re.split(r"</think>", reasoning, maxsplit=1)
+            if len(match) > 1 and match[1].strip():
+                msg.content = match[1].strip()
+            else:
+                # No think tags — use the full reasoning as content
+                msg.content = reasoning.strip()
+
+
+def _wrap_native_response(data: dict) -> openai.types.chat.ChatCompletion:
+    """Wrap a native Ollama /api/chat response as an OpenAI ChatCompletion."""
+    msg = data.get("message", {})
+    content = msg.get("content", "")
+    thinking = msg.get("thinking", "")
+
+    # Build a minimal ChatCompletion-compatible object
+    return openai.types.chat.ChatCompletion(
+        id="ollama-native",
+        choices=[
+            openai.types.chat.chat_completion.Choice(
+                index=0,
+                finish_reason="stop",
+                message=openai.types.chat.ChatCompletionMessage(
+                    role="assistant",
+                    content=content or thinking or "",
+                ),
+            )
+        ],
+        created=int(time.time()),
+        model=data.get("model", ""),
+        object="chat.completion",
+        usage=openai.types.CompletionUsage(
+            prompt_tokens=data.get("prompt_eval_count", 0),
+            completion_tokens=data.get("eval_count", 0),
+            total_tokens=data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+        ),
+    )

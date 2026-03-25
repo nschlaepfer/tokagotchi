@@ -12,6 +12,7 @@ dependencies = [
     "wandb>=0.16",           # Experiment tracking
     "numpy>=1.26",           # Numerical ops
     "jsonlines>=4.0",        # JSONL read/write
+    "aiohttp>=3.9",          # Async HTTP (Ollama health checks)
 ]
 
 [project.optional-dependencies]
