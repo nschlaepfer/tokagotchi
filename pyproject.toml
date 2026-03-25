@@ -1,10 +1,10 @@
 [project]
 name = "tokagotchi"
 version = "0.1.0"
-description = "Raise your own AI on a single GPU. Opus 4.6 continuously evolves and trains a local Qwen 3.5 27B via prompt evolution, distillation, and RL."
+description = "Raise your own coding agent on Apple Silicon. Opus 4.6 evolves local models via prompt evolution, distillation, and RL."
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.0",           # vLLM OpenAI-compatible client
+    "openai>=1.0",           # OpenAI-compatible local inference client
     "pydantic>=2.0",         # Config & data models
     "pyyaml>=6.0",           # Config loading
     "docker>=7.0",           # Docker container management
@@ -13,6 +13,8 @@ dependencies = [
     "numpy>=1.26",           # Numerical ops
     "jsonlines>=4.0",        # JSONL read/write
     "aiohttp>=3.9",          # Async HTTP (Ollama health checks)
+    "requests>=2.31",        # Health checks and integration tests
+    "dspy>=2.6",             # GEPA optimizer path merged from main
 ]
 
 [project.optional-dependencies]
@@ -27,6 +29,9 @@ training = [
 ]
 serving = [
     "vllm>=0.6",             # LLM serving
+]
+mlx = [
+    "mlx-lm>=0.31.0; platform_system == 'Darwin'",
 ]
 
 [project.scripts]

@@ -1,6 +1,11 @@
 model:
-  name: "huihui_ai/qwen3.5-abliterated:9b"
+  provider: "mlx"
+  name: "mlx-community/Qwen3-14B-4bit"
   quantization: ""
+  server_host: "127.0.0.1"
+  server_port: 8080
+  api_key: "local"
+  auto_start: true
   ollama_port: 11434
   ollama_host: "localhost"
 

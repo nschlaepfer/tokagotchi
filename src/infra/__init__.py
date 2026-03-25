@@ -1,4 +1,4 @@
-"""Infrastructure modules for vLLM serving, VRAM scheduling, and evaluation."""
+"""Infrastructure modules for local model serving, scheduling, and evaluation."""
 
 from src.infra.eval_harness import EvalHarness
 from src.infra.vllm_server import VLLMServer

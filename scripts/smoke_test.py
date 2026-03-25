@@ -1,10 +1,11 @@
-"""Smoke test: verify Ollama + Claude CLI work, then run a mini Loop 1 iteration.
+"""Smoke test: verify the local MLX/OpenAI-compatible server + Claude CLI work,
+then run a mini Loop 1 iteration.
 
 Usage:
     python scripts/smoke_test.py
 
 This test does NOT require Docker. It tests:
-1. Ollama is serving the model and can do inference
+1. The local model server is reachable and can do inference
 2. Claude CLI (headless) can be invoked and returns structured output
 3. A single GEPA mutation cycle works end-to-end
 """
@@ -17,8 +18,11 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import openai
+
+from src.config import load_config
 
 
 def find_claude_cli() -> str:
@@ -43,21 +47,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("smoke_test")
 
 
-async def test_ollama() -> bool:
-    """Test that Ollama is serving and can do inference."""
-    logger.info("=" * 60)
-    logger.info("TEST 1: Ollama inference")
-    logger.info("=" * 60)
+CFG = load_config(Path(__file__).resolve().parent.parent / "config")
+CLIENT = openai.AsyncOpenAI(
+    base_url=f"http://{CFG.model.resolved_host}:{CFG.model.resolved_port}/v1",
+    api_key=CFG.model.resolved_api_key,
+)
 
-    client = openai.AsyncOpenAI(
-        base_url="http://localhost:11434/v1",
-        api_key="ollama",
-    )
+
+async def test_local_llm() -> bool:
+    """Test that the configured local model server is serving and can do inference."""
+    logger.info("=" * 60)
+    logger.info("TEST 1: Local LLM inference (%s)", CFG.model.normalized_provider)
+    logger.info("=" * 60)
 
     try:
         t0 = time.time()
-        response = await client.chat.completions.create(
-            model="huihui_ai/qwen3.5-abliterated:27b",
+        response = await CLIENT.chat.completions.create(
+            model=CFG.model.name,
             messages=[
                 {"role": "system", "content": "You are a coding assistant. Be concise."},
                 {"role": "user", "content": "Write a Python function that checks if a number is prime. Just the code, nothing else."},
@@ -71,11 +77,11 @@ async def test_ollama() -> bool:
 
         logger.info("Response (%d tokens in %.1fs, %.1f tok/s):", tokens, elapsed, tokens / elapsed if elapsed > 0 else 0)
         logger.info(content[:500])
-        logger.info("PASS: Ollama inference works")
+        logger.info("PASS: Local LLM inference works")
         return True
 
     except Exception as e:
-        logger.error("FAIL: Ollama inference failed: %s", e)
+        logger.error("FAIL: Local LLM inference failed: %s", e)
         return False
 
 
@@ -123,16 +129,13 @@ async def test_mini_gepa_cycle() -> bool:
     logger.info("TEST 3: Mini GEPA cycle (Opus analyzes Qwen, proposes mutation)")
     logger.info("=" * 60)
 
-    # Step 1: Get a response from Qwen
-    client = openai.AsyncOpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-
     test_prompt = "You have 5 CSV files in /data/. Find the customer with the highest total spend. Think step by step."
     system_prompt = "You are a coding agent. You can use tools: [bash], [python], [read_file], [submit]. Format actions as [tool_name]: content"
 
     try:
         t0 = time.time()
-        qwen_response = await client.chat.completions.create(
-            model="huihui_ai/qwen3.5-abliterated:27b",
+        qwen_response = await CLIENT.chat.completions.create(
+            model=CFG.model.name,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": test_prompt},
@@ -182,10 +185,10 @@ Return ONLY valid JSON, no markdown."""
 async def main() -> None:
     results = {}
 
-    results["ollama"] = await test_ollama()
+    results["local_llm"] = await test_local_llm()
     results["claude_cli"] = await test_claude_cli()
 
-    if results["ollama"] and results["claude_cli"]:
+    if results["local_llm"] and results["claude_cli"]:
         results["gepa_cycle"] = await test_mini_gepa_cycle()
     else:
         logger.warning("Skipping GEPA cycle test — prerequisites failed")

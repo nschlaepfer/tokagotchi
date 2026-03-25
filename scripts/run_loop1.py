@@ -93,7 +93,7 @@ async def main(args: argparse.Namespace) -> None:
     arena_manager = create_arena_manager()
 
     # Start vLLM
-    logger.info("Starting vLLM server...")
+    logger.info("Starting local LLM server (%s)...", cfg.model.normalized_provider)
     await vllm_server.start()
 
     try:

@@ -110,7 +110,7 @@ def test_01_config_loading():
 
     cfg = load_config(PROJECT_ROOT / "config")
     assert isinstance(cfg, MasterConfig), f"Expected MasterConfig, got {type(cfg)}"
-    assert cfg.model.ollama_port == 11434, f"Expected port 11434, got {cfg.model.ollama_port}"
+    assert cfg.model.resolved_port > 0, f"Expected a positive serving port, got {cfg.model.resolved_port}"
     assert cfg.opus.daily_budget_usd > 0, "Daily budget should be positive"
     assert cfg.loop1.population_size > 0, "Population size should be positive"
     assert cfg.loop3.algorithm == "grpo", f"Expected grpo, got {cfg.loop3.algorithm}"
@@ -184,11 +184,11 @@ def test_02_models():
 
 
 # ===================================================================
-# Test 3: Ollama inference
+# Test 3: Local LLM inference
 # ===================================================================
 
-def test_03_ollama_inference():
-    """Make a chat completion call to Ollama via the openai client."""
+def test_03_local_llm_inference():
+    """Make a chat completion call to the configured local model server."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -197,36 +197,34 @@ def test_03_ollama_inference():
     from src.config import load_config
     cfg = load_config(PROJECT_ROOT / "config")
 
-    # Use native Ollama API with think=false to get direct content
-    # (Qwen 3.5 uses thinking mode by default, which puts content in reasoning field)
     import requests
 
-    api_url = f"http://{cfg.model.ollama_host}:{cfg.model.ollama_port}"
+    api_url = f"http://{cfg.model.resolved_host}:{cfg.model.resolved_port}"
 
     try:
         resp = requests.post(
-            f"{api_url}/api/chat",
+            f"{api_url}/v1/chat/completions",
             json={
                 "model": cfg.model.name,
                 "messages": [
                     {"role": "system", "content": "Reply in one short sentence."},
                     {"role": "user", "content": "What is 2+2?"},
                 ],
-                "stream": False,
-                "think": False,
-                "options": {"num_predict": 64, "temperature": 0.0},
+                "max_tokens": 64,
+                "temperature": 0.0,
             },
             timeout=120,
         )
         resp.raise_for_status()
     except Exception as exc:
-        skip(f"Ollama not reachable at {api_url}: {exc}")
+        skip(f"Local LLM server not reachable at {api_url}: {exc}")
 
     data = resp.json()
-    content = data.get("message", {}).get("content", "")
-    tokens = data.get("eval_count", 0)
-    assert len(content) > 0, f"Empty response from Ollama: {data}"
-    return f"Ollama responded ({tokens} tokens): {content[:80]}"
+    choice = (data.get("choices") or [{}])[0]
+    content = (choice.get("message") or {}).get("content", "")
+    tokens = (data.get("usage") or {}).get("completion_tokens", 0)
+    assert len(content) > 0, f"Empty response from local LLM server: {data}"
+    return f"Local LLM responded ({tokens} tokens): {content[:80]}"
 
 
 # ===================================================================
@@ -369,7 +367,7 @@ def test_06_opus_client():
 # ===================================================================
 
 def test_07_gepa_lite():
-    """Run 1 mini GEPA iteration: create seed genome, evaluate via Ollama, mutate via Opus."""
+    """Run 1 mini GEPA iteration: create seed genome, evaluate via the local LLM, mutate via Opus."""
 
     async def _run():
         from src.loop1_gepa.prompt_genome import create_seed_genome
@@ -380,7 +378,7 @@ def test_07_gepa_lite():
         assert genome.system_prompt, "Seed genome should have a system prompt"
         assert genome.generation == 0
 
-        # Step 2: Evaluate via Ollama (lightweight -- just test the model responds)
+        # Step 2: Evaluate via the local model server (lightweight -- just test it responds)
         try:
             from openai import OpenAI
         except ImportError:
@@ -391,27 +389,26 @@ def test_07_gepa_lite():
 
         try:
             import requests as _req
-            api_url = f"http://{cfg.model.ollama_host}:{cfg.model.ollama_port}"
+            api_url = f"http://{cfg.model.resolved_host}:{cfg.model.resolved_port}"
             resp = _req.post(
-                f"{api_url}/api/chat",
+                f"{api_url}/v1/chat/completions",
                 json={
                     "model": cfg.model.name,
                     "messages": [
                         {"role": "system", "content": genome.to_system_message()[:500]},
                         {"role": "user", "content": "What is the first step to fix a failing Python test?"},
                     ],
-                    "stream": False,
-                    "think": False,
-                    "options": {"num_predict": 100, "temperature": 0.7},
+                    "max_tokens": 100,
+                    "temperature": 0.7,
                 },
                 timeout=120,
             )
             resp.raise_for_status()
-            ollama_answer = resp.json().get("message", {}).get("content", "")
-            assert len(ollama_answer) > 0, "Empty Ollama response"
-            ollama_ok = True
+            local_llm_answer = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            assert len(local_llm_answer) > 0, "Empty local LLM response"
+            local_llm_ok = True
         except Exception:
-            ollama_ok = False
+            local_llm_ok = False
 
         # Step 3: Mutate via Opus (if available)
         opus_ok = False
@@ -441,14 +438,14 @@ def test_07_gepa_lite():
         except Exception:
             pass
 
-        if not ollama_ok and not opus_ok:
-            skip("Neither Ollama nor Claude CLI available for GEPA lite test")
+        if not local_llm_ok and not opus_ok:
+            skip("Neither the local LLM server nor Claude CLI is available for the GEPA lite test")
 
         parts = []
-        if ollama_ok:
-            parts.append("Ollama eval OK")
+        if local_llm_ok:
+            parts.append("Local LLM eval OK")
         else:
-            parts.append("Ollama eval SKIP")
+            parts.append("Local LLM eval SKIP")
         if opus_ok:
             parts.append("Opus mutation OK")
         else:
@@ -921,7 +918,7 @@ def main():
         ("Test 00: Imports", test_00_imports),
         ("Test 01: Config loading", test_01_config_loading),
         ("Test 02: Models serialization", test_02_models),
-        ("Test 03: Ollama inference", test_03_ollama_inference),
+        ("Test 03: Local LLM inference", test_03_local_llm_inference),
         ("Test 04: Claude CLI", test_04_claude_cli),
         ("Test 05: Budget Tracker", test_05_budget_tracker),
         ("Test 06: Opus Client (real call)", test_06_opus_client),

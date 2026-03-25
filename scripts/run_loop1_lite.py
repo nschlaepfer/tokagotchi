@@ -1,9 +1,9 @@
 """Loop 1 Lite: GEPA prompt evolution without Docker.
 
-Runs the core Opus-analyzes-Qwen-and-mutates-prompts loop using
-Ollama for Qwen inference and Claude CLI for Opus mutations.
-No Docker arena needed — tasks are evaluated purely through
-Qwen's generated action plans (not executed).
+Runs the core Opus-analyzes-Qwen-and-mutates-prompts loop using a
+local OpenAI-compatible model server plus Claude CLI for Opus mutations.
+No Docker arena needed — tasks are evaluated purely through generated
+action plans (not executed).
 
 Usage:
     python scripts/run_loop1_lite.py --iterations 5
@@ -43,8 +43,8 @@ def find_claude_cli() -> str:
     return "claude"
 
 CLAUDE_BIN = find_claude_cli()
-MODEL_NAME = "huihui_ai/qwen3.5-abliterated:27b"
-OLLAMA_BASE = "http://localhost:11434/v1"
+MODEL_NAME = "mlx-community/Qwen3-14B-4bit"
+LOCAL_LLM_BASE = "http://127.0.0.1:8080/v1"
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -186,7 +186,7 @@ async def propose_mutation(genome: PromptGenome, results: list[TaskResult]) -> P
 
     avg_score = sum(r.score for r in results) / len(results) if results else 0
 
-    prompt = f"""You are optimizing a system prompt for a coding agent (Qwen 3.5 27B).
+    prompt = f"""You are optimizing a system prompt for a coding agent.
 The agent must use tools like [bash], [python], [read_file], [write_file], [sql], [api_call], [submit] to solve coding tasks.
 
 CURRENT SYSTEM PROMPT:
@@ -267,7 +267,7 @@ Return ONLY a JSON object with these exact fields:
 async def run_gepa(iterations: int, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    client = openai.AsyncOpenAI(base_url=OLLAMA_BASE, api_key="ollama")
+    client = openai.AsyncOpenAI(base_url=LOCAL_LLM_BASE, api_key="local")
 
     # Seed genome
     genome = PromptGenome(

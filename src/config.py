@@ -11,19 +11,58 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    # Ollama model for inference (Loop 1 rollouts, arena episodes)
-    name: str = "huihui_ai/qwen3.5-abliterated:9b"
-    quantization: str = ""  # Ollama handles quantization internally (Q4_K_M)
+    # Local inference backend for Loop 1 / arena episodes.
+    provider: str = "mlx"
+    name: str = "mlx-community/Qwen3-14B-4bit"
+    server_host: str = "127.0.0.1"
+    server_port: int = 8080
+    api_key: str = "local"
+    auto_start: bool = True
+    server_command: str = ""
+    quantization: str = ""
+    # HuggingFace model for training (Loop 2 SFT, Loop 3 RL). These loops
+    # still use the existing PyTorch pipeline and are not MLX-native yet.
+    hf_model_path: str = "models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated"
+    hf_model_path_27b: str = "huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated"
+    # Legacy backend fields kept for backward compatibility / provider-specific
+    # overrides when switching away from the MLX default.
     ollama_port: int = 11434
     ollama_host: str = "localhost"
-    # HuggingFace model for training (Loop 2 SFT, Loop 3 RL)
-    hf_model_path: str = "models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated"
-    # Scale-up model (noted for later)
-    hf_model_path_27b: str = "huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated"
-    # Legacy vLLM fields (kept for backward compat)
     vllm_gpu_memory_utilization: float = 0.50
     vllm_port: int = 11434
     vllm_host: str = "localhost"
+
+    @property
+    def normalized_provider(self) -> str:
+        return (self.provider or "mlx").strip().lower()
+
+    @property
+    def resolved_host(self) -> str:
+        if self.server_host:
+            return self.server_host
+        if self.normalized_provider == "ollama":
+            return self.ollama_host
+        if self.normalized_provider == "vllm":
+            return self.vllm_host
+        return "127.0.0.1"
+
+    @property
+    def resolved_port(self) -> int:
+        if self.server_port:
+            return self.server_port
+        if self.normalized_provider == "ollama":
+            return self.ollama_port
+        if self.normalized_provider == "vllm":
+            return self.vllm_port
+        return 8080
+
+    @property
+    def resolved_api_key(self) -> str:
+        if self.api_key:
+            return self.api_key
+        if self.normalized_provider == "ollama":
+            return "ollama"
+        return "local"
 
 
 @dataclass

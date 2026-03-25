@@ -1,4 +1,4 @@
-"""VRAM phase scheduler for single-GPU (RTX 5090 32 GB) serving/training transitions."""
+"""Memory phase scheduler for local serving/training transitions."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class VRAMScheduler:
         return self._phase.value
 
     async def enter_serving_phase(self) -> None:
-        """Start the vLLM server and switch to serving phase."""
+        """Start the local LLM server and switch to serving phase."""
         async with self._lock:
             if self._phase == Phase.SERVING:
                 logger.info("Already in serving phase — no-op")
@@ -67,7 +67,7 @@ class VRAMScheduler:
             logger.info("[%s] Phase is now SERVING", _ts())
 
     async def enter_training_phase(self) -> None:
-        """Stop the vLLM server, wait for VRAM to free, switch to training."""
+        """Stop the local LLM server, wait for accelerator memory to free, switch to training."""
         async with self._lock:
             if self._phase == Phase.TRAINING:
                 logger.info("Already in training phase — no-op")

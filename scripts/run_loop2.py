@@ -117,7 +117,7 @@ async def main(args: argparse.Namespace) -> None:
         genome = create_seed_genome()
 
     # Enter serving phase for trace collection
-    logger.info("Starting vLLM server for trace collection...")
+    logger.info("Starting local LLM server (%s) for trace collection...", cfg.model.normalized_provider)
     await vram_scheduler.enter_serving_phase()
 
     try:
@@ -177,7 +177,7 @@ async def main(args: argparse.Namespace) -> None:
             await vram_scheduler.enter_training_phase()
 
             try:
-                # Use HF model path for training (not the Ollama tag)
+                # Use the HF training path, not the inference-serving model id.
                 hf_model = str(Path(cfg.model.hf_model_path).resolve())
                 if not Path(hf_model).exists():
                     # Fall back: try relative to project root

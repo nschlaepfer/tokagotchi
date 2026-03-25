@@ -94,18 +94,26 @@ class DspyGEPAEngine:
         """Set up DSPy LMs, build the program, and load any saved state."""
         self._start_time = time.time()
 
-        # Configure student LM (Qwen via Ollama)
+        # Configure student LM against the local serving backend.
         model_name = self.config.model.name
-        ollama_host = self.config.model.ollama_host
-        ollama_port = self.config.model.ollama_port
-
-        self._student_lm = dspy.LM(
-            model=f"ollama_chat/{model_name}",
-            api_base=f"http://{ollama_host}:{ollama_port}",
-            api_key="",  # Ollama doesn't need a key
-            temperature=0.7,
-            max_tokens=2048,
-        )
+        provider = self.config.model.normalized_provider
+        if provider == "ollama":
+            self._student_lm = dspy.LM(
+                model=f"ollama_chat/{model_name}",
+                api_base=f"http://{self.config.model.ollama_host}:{self.config.model.ollama_port}",
+                api_key="",
+                temperature=0.7,
+                max_tokens=2048,
+            )
+        else:
+            self._student_lm = dspy.LM(
+                model=f"openai/{model_name}",
+                api_base=self.vllm_server.base_url,
+                api_key=self.config.model.resolved_api_key,
+                model_type="chat",
+                temperature=0.7,
+                max_tokens=2048,
+            )
 
         # Configure reflection LM (Claude Opus via CLI)
         # Uses the Claude CLI's built-in auth — no ANTHROPIC_API_KEY needed.
@@ -158,7 +166,8 @@ class DspyGEPAEngine:
                 logger.warning("Failed to load saved state: %s", e)
 
         logger.info(
-            "DspyGEPAEngine initialized: student=%s, reflector=%s, tasks=%d",
+            "DspyGEPAEngine initialized: provider=%s student=%s, reflector=%s, tasks=%d",
+            provider,
             model_name,
             self.config.opus.model,
             len(self._trainset),

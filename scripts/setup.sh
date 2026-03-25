@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # ============================================================
-# Qwen Self-Improve — Setup Script
+# tokagotchi MLX — Setup Script
 #
-# Checks prerequisites, installs the project, downloads the
-# base model, builds the Docker arena image, creates seed data,
+# Installs the project, prepares the Apple Silicon inference path,
+# builds the arena image when Docker is available, creates seed data,
 # and initializes the git experiment repo.
 # ============================================================
 
@@ -42,29 +42,35 @@ fi
 info "Python $PY_VERSION — OK"
 
 # ------------------------------------------------------------------
-# 2. Install the project with all extras
+# 2. Install the project with the appropriate extras
 # ------------------------------------------------------------------
-info "Installing qwen-self-improve with all extras..."
+info "Installing tokagotchi dependencies..."
 "$PYTHON" -m pip install --upgrade pip
-"$PYTHON" -m pip install -e ".[training,dev]"
+if [ "$(uname -s)" = "Darwin" ]; then
+    "$PYTHON" -m pip install -e ".[mlx]"
+else
+    "$PYTHON" -m pip install -e ".[training]"
+fi
 info "Package installation complete"
 
 # ------------------------------------------------------------------
-# 3. Download Qwen 3.5 27B (AWQ quantised)
+# 3. Prepare the default local model
 # ------------------------------------------------------------------
-MODEL_ID="Qwen/Qwen3.5-27B-AWQ"
-MODEL_DIR="./models/Qwen3.5-27B-AWQ"
+MODEL_ID="mlx-community/Qwen3-14B-4bit"
+MODEL_DIR="./models/mlx-community-Qwen3-14B-4bit"
 
-if [ -d "$MODEL_DIR" ] && [ "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]; then
-    info "Model already downloaded at $MODEL_DIR — skipping"
-else
-    info "Downloading $MODEL_ID ..."
-    if command -v huggingface-cli &>/dev/null; then
-        huggingface-cli download "$MODEL_ID" --local-dir "$MODEL_DIR"
+if [ "$(uname -s)" = "Darwin" ]; then
+    info "Default MLX model: $MODEL_ID"
+    if [ -d "$MODEL_DIR" ] && [ "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]; then
+        info "Local MLX model cache already present at $MODEL_DIR"
     else
-        warn "huggingface-cli not found. Install with: pip install huggingface-hub[cli]"
-        warn "Then run: huggingface-cli download $MODEL_ID --local-dir $MODEL_DIR"
+        warn "No local cache found for $MODEL_ID."
+        warn "The model will be downloaded automatically the first time mlx_lm.server starts."
+        warn "To prefetch manually: huggingface-cli download $MODEL_ID --local-dir $MODEL_DIR"
     fi
+else
+    warn "Non-Darwin host detected. This branch defaults to MLX serving on Apple Silicon."
+    warn "You can still override config/model.provider if you want to use Ollama or vLLM."
 fi
 
 # ------------------------------------------------------------------
@@ -182,6 +188,7 @@ info " Setup complete!"
 info "=========================================="
 info ""
 info " Quick start:"
+info "   python scripts/smoke_test.py"
 info "   python scripts/run_loop1.py --config config/ --iterations 10"
 info "   python scripts/run_all.py   --config config/"
 info ""
