@@ -47,6 +47,8 @@ def arena_metric(
     gold: dspy.Example,
     pred: dspy.Prediction,
     trace: Any = None,
+    pred_name: str | None = None,
+    pred_trace: Any = None,
 ) -> dict[str, Any]:
     """Evaluate an agent's prediction against a task in a sandbox.
 
