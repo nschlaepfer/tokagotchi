@@ -30,6 +30,12 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Xcode
+DerivedData/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
 # Model weights (download separately)
 models/
 
