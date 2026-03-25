@@ -26,7 +26,7 @@ def test_4bit_load_and_train(model_path: str) -> None:
     print(f"CUDA: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"Device: {torch.cuda.get_device_name(0)}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     print()
 
     # ---- Step 1: Load in 4-bit ----
@@ -123,7 +123,7 @@ def test_4bit_load_and_train(model_path: str) -> None:
     print(f"  Gradients: {grad_params}/{total_params} trainable params have grads")
 
     vram_peak = torch.cuda.max_memory_allocated() / 1e9
-    print(f"  Peak VRAM: {vram_peak:.2f} GB / {torch.cuda.get_device_properties(0).total_mem / 1e9:.0f} GB")
+    print(f"  Peak VRAM: {vram_peak:.2f} GB / {torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB")
     print()
 
     # ---- Step 4: Optimizer step ----
@@ -197,9 +197,9 @@ def test_4bit_load_and_train(model_path: str) -> None:
     print(f"  Loss: {loss.item():.4f}")
     print(f"  Adapter size: {adapter_size:.1f} MB")
     print()
-    print("  ✓ ALL STEPS PASSED — Training pipeline is functional!")
+    print("  PASS ALL STEPS PASSED — Training pipeline is functional!")
     print()
-    headroom = torch.cuda.get_device_properties(0).total_mem / 1e9 - vram_after_opt
+    headroom = torch.cuda.get_device_properties(0).total_memory / 1e9 - vram_after_opt
     print(f"  VRAM headroom: {headroom:.1f} GB (available for larger batches)")
     if headroom > 5:
         print("  → Plenty of room. Can increase batch_size or LoRA rank.")
