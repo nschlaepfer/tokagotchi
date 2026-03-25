@@ -19,7 +19,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from src.arena.docker_manager import DockerManager
+from src.arena.docker_manager import create_arena_manager
 from src.config import MasterConfig, load_config
 from src.infra.eval_harness import EvalHarness
 from src.infra.vllm_server import VLLMServer
@@ -90,7 +90,7 @@ async def main(args: argparse.Namespace) -> None:
     )
     opus_client = OpusClient(config=cfg.opus, budget_tracker=budget_tracker)
     vllm_server = VLLMServer(cfg.model, log_dir=data_dir / "logs")
-    arena_manager = DockerManager()
+    arena_manager = create_arena_manager()
 
     # Start vLLM
     logger.info("Starting vLLM server...")
