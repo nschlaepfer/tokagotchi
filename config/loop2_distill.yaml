@@ -1,7 +1,7 @@
 loop2:
   teacher_ratio: 0.20
   mentor_ratio: 0.80
-  min_buffer_size: 500
+  min_buffer_size: 10
   max_buffer_size: 5000
   diversity_min_task_types: 3
   diversity_min_failure_modes: 3

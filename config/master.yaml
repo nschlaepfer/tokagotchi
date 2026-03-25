@@ -1,5 +1,5 @@
 model:
-  name: "huihui_ai/qwen3.5-abliterated:27b"
+  name: "huihui_ai/qwen3.5-abliterated:9b"
   quantization: ""
   ollama_port: 11434
   ollama_host: "localhost"

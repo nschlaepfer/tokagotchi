@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.arena.docker_manager import DockerManager
+from src.arena.docker_manager import create_arena_manager
 from src.config import MasterConfig, load_config
 from src.curriculum.sec_engine import SECEngine
 from src.infra.eval_harness import EvalHarness
@@ -70,7 +70,7 @@ class MasterLoop:
         self.opus_client: OpusClient | None = None
         self.vllm_server: VLLMServer | None = None
         self.vram_scheduler: VRAMScheduler | None = None
-        self.arena_manager: DockerManager | None = None
+        self.arena_manager: Any | None = None  # DockerManager or SubprocessManager
         self.curriculum: SECEngine | None = None
         self.composite_reward: CompositeReward | None = None
         self.experiment_git: ExperimentGit | None = None
@@ -166,8 +166,9 @@ class MasterLoop:
         # VRAM scheduler
         self.vram_scheduler = VRAMScheduler(self.vllm_server)
 
-        # Arena
-        self.arena_manager = DockerManager()
+        # Arena (auto-detects Docker, falls back to subprocess)
+        self.arena_manager = create_arena_manager()
+        logger.info("Arena backend: %s", type(self.arena_manager).__name__)
 
         # Curriculum
         self.curriculum = SECEngine(task_bank_path=data_dir / "task_bank.json")
@@ -294,10 +295,14 @@ class MasterLoop:
                         await self.vram_scheduler.enter_training_phase()
 
                         try:
+                            # Use HF model path for training (not Ollama tag)
+                            hf_model = str(Path(self.config.model.hf_model_path).resolve())
+                            if not Path(hf_model).exists():
+                                hf_model = str(Path(".") / self.config.model.hf_model_path)
                             checkpoint_path = await self._sft_launcher.launch_training(
                                 training_data=training_data,
                                 config=self.config.loop2,
-                                base_model_path=self.config.model.name,
+                                base_model_path=hf_model,
                             )
                             logger.info("Loop 2: SFT complete — checkpoint at %s", checkpoint_path)
 
