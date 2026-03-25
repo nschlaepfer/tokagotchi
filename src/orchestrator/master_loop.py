@@ -187,14 +187,27 @@ class MasterLoop:
         seed_tasks = self.eval_harness.load_benchmark_tasks(
             str(data_dir / "curriculum" / "seed_tasks.json")
         )
-        self._gepa_engine = GEPAEngine(
-            config=cfg,
-            opus_client=self.opus_client,
-            vllm_server=self.vllm_server,
-            arena_manager=self.arena_manager,
-            tasks=seed_tasks,
-            data_dir=data_dir,
-        )
+        if getattr(cfg.loop1, "use_dspy_gepa", False):
+            from src.loop1_gepa.dspy_gepa_engine import DspyGEPAEngine
+            self._gepa_engine = DspyGEPAEngine(
+                config=cfg,
+                opus_client=self.opus_client,
+                vllm_server=self.vllm_server,
+                arena_manager=self.arena_manager,
+                tasks=seed_tasks,
+                data_dir=data_dir / "loop1_gepa",
+            )
+            logger.info("Loop 1 engine: DspyGEPAEngine (real DSPy GEPA)")
+        else:
+            self._gepa_engine = GEPAEngine(
+                config=cfg,
+                opus_client=self.opus_client,
+                vllm_server=self.vllm_server,
+                arena_manager=self.arena_manager,
+                tasks=seed_tasks,
+                data_dir=data_dir,
+            )
+            logger.info("Loop 1 engine: GEPAEngine (custom)")
 
         # Loop 2 — Distillation
         self._trace_collector = TraceCollector()

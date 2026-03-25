@@ -76,6 +76,10 @@ class Loop1Config:
     crossover_rate: float = 0.2
     elite_size: int = 5
     max_prompt_length: int = 4000
+    # DSPy GEPA integration
+    use_dspy_gepa: bool = True
+    dspy_num_threads: int = 4
+    dspy_max_metric_calls: int = 150
 
 
 @dataclass

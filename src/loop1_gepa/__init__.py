@@ -18,6 +18,7 @@ from src.loop1_gepa.prompt_genome import (
 )
 
 __all__ = [
+    "DspyGEPAEngine",
     "GEPAEngine",
     "MutationOperator",
     "ParetoTracker",
