@@ -125,7 +125,7 @@ class OpusClient:
                 error_message="Budget pre-check failed: would exceed limits",
             )
 
-        cmd = self._build_command(
+        cmd, stdin_text = self._build_command(
             prompt=prompt,
             tools=tools,
             json_schema=json_schema,
@@ -134,7 +134,7 @@ class OpusClient:
             max_turns=turns,
         )
 
-        response = await self._run_with_retries(cmd, budget_usd=budget, loop_id="query")
+        response = await self._run_with_retries(cmd, stdin_text=stdin_text, budget_usd=budget, loop_id="query")
         return response
 
     # ------------------------------------------------------------------
@@ -415,18 +415,41 @@ class OpusClient:
         max_budget_usd: float = 0.50,
         session_id: str | None = None,
         max_turns: int = 10,
-    ) -> list[str]:
-        """Build the ``claude`` CLI argument list."""
-        cmd = [
-            "claude",
-            "-p", prompt,
-            "--output-format", "json",
-            "--max-turns", str(max_turns),
-            "--max-budget-usd", f"{max_budget_usd:.2f}",
-        ]
+    ) -> tuple[list[str], str | None]:
+        """Build the ``claude`` CLI argument list.
 
+        Returns (cmd, stdin_text) — if the prompt is long (>4000 chars),
+        it's piped via stdin to avoid Windows command-line length limits.
+        """
+        stdin_text: str | None = None
+
+        cli_cmd = _resolve_claude_cli()  # returns a list like ["node", "cli.js"]
+
+        # Windows has ~8191 char command-line limit; use stdin for safety at 4000
+        if len(prompt) > 4000:
+            cmd = [
+                *cli_cmd,
+                "-p", "-",  # read from stdin
+                "--output-format", "json",
+                "--max-turns", str(max_turns),
+                "--max-budget-usd", f"{max_budget_usd:.2f}",
+            ]
+            stdin_text = prompt
+        else:
+            cmd = [
+                *cli_cmd,
+                "-p", prompt,
+                "--output-format", "json",
+                "--max-turns", str(max_turns),
+                "--max-budget-usd", f"{max_budget_usd:.2f}",
+            ]
+
+        # Restrict tool usage: by default no tools (pure text generation)
+        # to prevent the model from trying to write files or use agents
         if tools:
             cmd.extend(["--allowedTools", json.dumps(tools)])
+        else:
+            cmd.extend(["--allowedTools", ""])
 
         if json_schema:
             cmd.extend(["--json-schema", json.dumps(json_schema)])
@@ -434,7 +457,7 @@ class OpusClient:
         if session_id:
             cmd.extend(["--resume", session_id])
 
-        return cmd
+        return cmd, stdin_text
 
     # ------------------------------------------------------------------
     # Subprocess runner with retries
@@ -444,6 +467,7 @@ class OpusClient:
         self,
         cmd: list[str],
         *,
+        stdin_text: str | None = None,
         budget_usd: float,
         loop_id: str,
     ) -> OpusResponse:
@@ -452,7 +476,7 @@ class OpusClient:
         for attempt in range(1, self.max_retries + 1):
             start = time.monotonic()
             try:
-                response = await self._execute(cmd)
+                response = await self._execute(cmd, stdin_text=stdin_text)
                 response.duration_seconds = time.monotonic() - start
 
                 # Record cost
@@ -482,19 +506,21 @@ class OpusClient:
 
         return OpusResponse(is_error=True, error_message=f"All retries exhausted. Last: {last_error}")
 
-    async def _execute(self, cmd: list[str]) -> OpusResponse:
+    async def _execute(self, cmd: list[str], *, stdin_text: str | None = None) -> OpusResponse:
         """Run a single ``claude`` CLI invocation and parse its output."""
         timeout = 300  # 5 minutes
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE if stdin_text else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
         try:
+            stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
+                proc.communicate(input=stdin_bytes), timeout=timeout
             )
         except asyncio.TimeoutError:
             proc.kill()
@@ -542,17 +568,31 @@ class OpusClient:
         else:
             text = str(result)
 
-        cost = data.get("cost_usd", 0.0)
-        # Also check for nested usage stats
+        # Cost: CLI uses "total_cost_usd" (or fallback "cost_usd")
+        cost = data.get("total_cost_usd", data.get("cost_usd", 0.0))
+
+        # Usage: CLI uses "input_tokens" / "output_tokens" in usage dict
         usage = data.get("usage", {})
+        prompt_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        completion_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+
+        # Check for CLI-level error
+        is_error = data.get("is_error", False)
+        error_message = ""
+        if is_error:
+            error_message = data.get("error", data.get("result", "Unknown CLI error"))
+            if isinstance(error_message, dict):
+                error_message = json.dumps(error_message)
 
         return OpusResponse(
             raw_json=raw_json,
             text=text,
             cost_usd=float(cost) if cost else 0.0,
-            prompt_tokens=usage.get("prompt_tokens", data.get("prompt_tokens", 0)),
-            completion_tokens=usage.get("completion_tokens", data.get("completion_tokens", 0)),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             session_id=data.get("session_id", ""),
+            is_error=is_error,
+            error_message=str(error_message) if is_error else "",
         )
 
     # ------------------------------------------------------------------
@@ -578,3 +618,48 @@ class OpusClient:
     def call_log(self) -> list[dict[str, Any]]:
         """Return a copy of the call log for inspection."""
         return list(self._call_log)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+_CLAUDE_CLI_CMD: list[str] | None = None
+
+
+def _resolve_claude_cli() -> list[str]:
+    """Find the ``claude`` CLI and return the command list to invoke it.
+
+    On Windows, ``.cmd`` shims hang when invoked via ``create_subprocess_exec``,
+    so we bypass the wrapper and call ``node cli.js`` directly.
+
+    Returns a list like ``["node", "/path/to/cli.js"]`` or ``["claude"]``.
+    """
+    global _CLAUDE_CLI_CMD
+    if _CLAUDE_CLI_CMD is not None:
+        return _CLAUDE_CLI_CMD
+
+    import os
+    import shutil
+    import sys
+
+    if sys.platform == "win32":
+        # On Windows, find the actual Node.js entry point to avoid .CMD wrapper issues
+        npm_dir = os.path.expandvars(r"%APPDATA%\npm")
+        cli_js = os.path.join(npm_dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js")
+
+        if os.path.isfile(cli_js):
+            node = shutil.which("node") or "node"
+            _CLAUDE_CLI_CMD = [node, cli_js]
+            return _CLAUDE_CLI_CMD
+
+        # Fallback: try the .cmd via shell
+        cmd_path = os.path.join(npm_dir, "claude.cmd")
+        if os.path.isfile(cmd_path):
+            _CLAUDE_CLI_CMD = [cmd_path]
+            return _CLAUDE_CLI_CMD
+
+    # Non-Windows or fallback
+    found = shutil.which("claude")
+    _CLAUDE_CLI_CMD = [found] if found else ["claude"]
+    return _CLAUDE_CLI_CMD
