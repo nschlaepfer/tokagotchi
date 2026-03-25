@@ -82,6 +82,37 @@ def _build_mutation_prompt(
 ) -> str:
     """Construct the prompt sent to Opus for mutation proposal."""
 
+    # Compute action format diagnostics across ALL trajectories
+    total_steps = 0
+    think_fallback_steps = 0
+    successful_tool_calls = 0
+    total_tool_calls = 0
+    for traj in eval_result.trajectories:
+        for s in traj.steps:
+            total_steps += 1
+            if s.action_type.value == "think":
+                think_fallback_steps += 1
+            else:
+                total_tool_calls += 1
+                if s.observation and "error" not in s.observation.lower()[:50]:
+                    successful_tool_calls += 1
+
+    format_diagnostics = {
+        "total_steps": total_steps,
+        "think_fallback_steps": think_fallback_steps,
+        "think_fallback_pct": round(100 * think_fallback_steps / max(total_steps, 1), 1),
+        "successful_tool_calls": successful_tool_calls,
+        "total_tool_calls": total_tool_calls,
+        "diagnosis": (
+            "CRITICAL: Agent is not formatting tool calls correctly. "
+            f"{think_fallback_steps}/{total_steps} steps ({round(100 * think_fallback_steps / max(total_steps, 1))}%) "
+            "were unparseable and fell back to 'think'. The agent needs explicit "
+            "instructions on the exact [action_type]: content format."
+            if think_fallback_steps > total_steps * 0.3
+            else "Action format is acceptable."
+        ),
+    }
+
     # Summarize failure trajectories for context
     failure_summaries: list[dict[str, Any]] = []
     for traj in eval_result.trajectories:
@@ -142,6 +173,11 @@ single, focused mutation to improve performance.
 {json.dumps(scores, indent=2)}
 ```
 
+## Action Format Diagnostics
+```json
+{json.dumps(format_diagnostics, indent=2)}
+```
+
 ## Failure Patterns
 {json.dumps(eval_result.failure_patterns, indent=2)}
 
@@ -153,17 +189,26 @@ single, focused mutation to improve performance.
 ## Available Mutation Types
 {mutation_types_desc}
 
-## Instructions
-1. Diagnose the root cause of failures from the trajectory samples and failure patterns.
-2. Select the single most impactful mutation type to address the root cause.
-3. Apply that mutation to the genome fields. Return ALL genome fields (not just \
-the changed ones) so the result is a complete, self-contained genome.
-4. Keep changes minimal and targeted. Preserve everything that is working well.
-5. If success_rate is low, prioritize fixing core reasoning or tool usage.
-6. If avg_steps is high, focus on efficiency improvements.
-7. If tool_accuracy is low, improve tool instructions or add examples.
+## CRITICAL INSTRUCTIONS
+1. Read the Action Format Diagnostics FIRST. If think_fallback_pct > 30%, the \
+agent is failing to format tool calls. Use modify_tool_instructions or \
+add_example to fix this — do NOT use rephrase_section for format issues.
+2. Diagnose the root cause from trajectories and failure patterns.
+3. Select the MOST IMPACTFUL mutation type. DO NOT default to rephrase_section \
+unless rephrasing is genuinely the best fix. Consider:
+   - add_example: if the agent lacks concrete examples of correct behavior
+   - modify_tool_instructions: if tool calls are malformed or missing
+   - strengthen_instruction: if the agent ignores important constraints
+   - add_error_recovery: if the agent fails to recover from errors
+   - add_cot_step: if the agent skips important reasoning steps
+4. Apply the mutation to ALL genome fields. Return the complete genome.
+5. If success_rate < 0.3, focus on the single biggest failure mode, not general improvements.
+6. The agent uses [bash]: command, [python]: code, [read_file]: path, \
+[write_file]: path\\ncontent, [submit]: answer format. Make sure tool_instructions \
+specify this EXACTLY.
 
-Return a JSON object with: mutation_type, diagnosis, rationale, and all genome fields."""
+Return a JSON object with: mutation_type, diagnosis, rationale, system_prompt, \
+few_shot_examples, cot_scaffold, tool_instructions, error_recovery_hints."""
 
 
 _MUTATION_DESCRIPTIONS: dict[MutationOperator, str] = {

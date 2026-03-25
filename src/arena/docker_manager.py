@@ -309,3 +309,30 @@ def _run_exec_with_timeout(
             raise TimeoutError(
                 f"Command exceeded {timeout}s timeout"
             ) from None
+
+
+# ------------------------------------------------------------------
+# Factory
+# ------------------------------------------------------------------
+
+
+def create_arena_manager(use_docker: bool = None) -> "DockerManager | SubprocessManager":
+    """Create the appropriate arena manager based on Docker availability."""
+    if use_docker is None:
+        # Auto-detect: ping AND try to list containers (catches credential errors)
+        try:
+            import docker as _docker
+            client = _docker.from_env()
+            client.ping()
+            client.containers.list(limit=1)  # Actually exercises Docker API
+            use_docker = True
+            logger.info("Docker detected and working")
+        except Exception as e:
+            logger.info("Docker not available (%s), using subprocess sandbox", e)
+            use_docker = False
+
+    if use_docker:
+        return DockerManager()
+    else:
+        from src.arena.subprocess_manager import SubprocessManager
+        return SubprocessManager()

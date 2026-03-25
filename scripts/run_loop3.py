@@ -21,7 +21,7 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from src.arena.docker_manager import DockerManager
+from src.arena.docker_manager import create_arena_manager
 from src.config import MasterConfig, load_config
 from src.curriculum.sec_engine import SECEngine
 from src.infra.vllm_server import VLLMServer
@@ -54,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         help="Override data directory from config",
     )
     parser.add_argument(
+        "--sandbox", type=str, default="auto",
+        choices=["docker", "subprocess", "auto"],
+        help="Arena sandbox backend: docker, subprocess, or auto-detect",
+    )
+    parser.add_argument(
         "--log-level", type=str, default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
@@ -74,9 +79,18 @@ async def main(args: argparse.Namespace) -> None:
         persist_path=data_dir / "budget_state.json",
     )
     opus_client = OpusClient(config=cfg.opus, budget_tracker=budget_tracker)
-    vllm_server = VLLMServer(cfg.model, log_dir=data_dir / "logs")
+    vllm_server = VLLMServer(cfg.model)
     vram_scheduler = VRAMScheduler(vllm_server)
-    arena_manager = DockerManager()
+
+    # Arena sandbox: auto-detect Docker, fall back to subprocess
+    use_docker = None
+    if args.sandbox == "docker":
+        use_docker = True
+    elif args.sandbox == "subprocess":
+        use_docker = False
+    arena_manager = create_arena_manager(use_docker=use_docker)
+    logger.info("Arena backend: %s", type(arena_manager).__name__)
+
     curriculum = SECEngine(task_bank_path=data_dir / "task_bank.json")
 
     rl_runner = RLRunner(

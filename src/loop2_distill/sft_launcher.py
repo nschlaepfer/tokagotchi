@@ -81,6 +81,7 @@ class SFTLauncher:
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
+            BitsAndBytesConfig,
             TrainingArguments,
         )
         from trl import SFTTrainer, SFTConfig
@@ -99,7 +100,7 @@ class SFTLauncher:
         # 2. Load dataset
         dataset = self._load_dataset(data_path)
 
-        # 3. Load tokenizer and model
+        # 3. Load tokenizer and model (4-bit quantized for 32GB VRAM)
         tokenizer = AutoTokenizer.from_pretrained(
             base_model_path,
             trust_remote_code=True,
@@ -107,9 +108,18 @@ class SFTLauncher:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        # 4-bit QLoRA config — fits 9B model in ~6GB, leaves room for
+        # LoRA adapters, optimizer states, and activations
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16 if config.bf16 else torch.float16,
+            bnb_4bit_use_double_quant=True,  # nested quantization saves ~0.4GB
+        )
+
         model = AutoModelForCausalLM.from_pretrained(
             base_model_path,
-            torch_dtype=torch.bfloat16 if config.bf16 else torch.float16,
+            quantization_config=bnb_config,
             device_map="auto",
             trust_remote_code=True,
         )

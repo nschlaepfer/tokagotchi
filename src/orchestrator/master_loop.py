@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.arena.docker_manager import DockerManager
+from src.arena.docker_manager import create_arena_manager
 from src.config import MasterConfig, load_config
 from src.curriculum.sec_engine import SECEngine
 from src.infra.eval_harness import EvalHarness
@@ -70,7 +70,7 @@ class MasterLoop:
         self.opus_client: OpusClient | None = None
         self.vllm_server: VLLMServer | None = None
         self.vram_scheduler: VRAMScheduler | None = None
-        self.arena_manager: DockerManager | None = None
+        self.arena_manager: Any | None = None  # DockerManager or SubprocessManager
         self.curriculum: SECEngine | None = None
         self.composite_reward: CompositeReward | None = None
         self.experiment_git: ExperimentGit | None = None
@@ -161,13 +161,14 @@ class MasterLoop:
         )
 
         # vLLM server
-        self.vllm_server = VLLMServer(cfg.model, log_dir=data_dir / "logs")
+        self.vllm_server = VLLMServer(cfg.model)
 
         # VRAM scheduler
         self.vram_scheduler = VRAMScheduler(self.vllm_server)
 
-        # Arena
-        self.arena_manager = DockerManager()
+        # Arena (auto-detects Docker, falls back to subprocess)
+        self.arena_manager = create_arena_manager()
+        logger.info("Arena backend: %s", type(self.arena_manager).__name__)
 
         # Curriculum
         self.curriculum = SECEngine(task_bank_path=data_dir / "task_bank.json")
@@ -186,14 +187,27 @@ class MasterLoop:
         seed_tasks = self.eval_harness.load_benchmark_tasks(
             str(data_dir / "curriculum" / "seed_tasks.json")
         )
-        self._gepa_engine = GEPAEngine(
-            config=cfg,
-            opus_client=self.opus_client,
-            vllm_server=self.vllm_server,
-            arena_manager=self.arena_manager,
-            tasks=seed_tasks,
-            data_dir=data_dir,
-        )
+        if getattr(cfg.loop1, "use_dspy_gepa", False):
+            from src.loop1_gepa.dspy_gepa_engine import DspyGEPAEngine
+            self._gepa_engine = DspyGEPAEngine(
+                config=cfg,
+                opus_client=self.opus_client,
+                vllm_server=self.vllm_server,
+                arena_manager=self.arena_manager,
+                tasks=seed_tasks,
+                data_dir=data_dir / "loop1_gepa",
+            )
+            logger.info("Loop 1 engine: DspyGEPAEngine (real DSPy GEPA)")
+        else:
+            self._gepa_engine = GEPAEngine(
+                config=cfg,
+                opus_client=self.opus_client,
+                vllm_server=self.vllm_server,
+                arena_manager=self.arena_manager,
+                tasks=seed_tasks,
+                data_dir=data_dir,
+            )
+            logger.info("Loop 1 engine: GEPAEngine (custom)")
 
         # Loop 2 — Distillation
         self._trace_collector = TraceCollector()
@@ -294,10 +308,14 @@ class MasterLoop:
                         await self.vram_scheduler.enter_training_phase()
 
                         try:
+                            # Use HF model path for training (not Ollama tag)
+                            hf_model = str(Path(self.config.model.hf_model_path).resolve())
+                            if not Path(hf_model).exists():
+                                hf_model = str(Path(".") / self.config.model.hf_model_path)
                             checkpoint_path = await self._sft_launcher.launch_training(
                                 training_data=training_data,
                                 config=self.config.loop2,
-                                base_model_path=self.config.model.name,
+                                base_model_path=hf_model,
                             )
                             logger.info("Loop 2: SFT complete — checkpoint at %s", checkpoint_path)
 
@@ -348,7 +366,7 @@ class MasterLoop:
         # Sample tasks from curriculum
         if self.curriculum is None:
             return
-        tasks = self.curriculum.sample(n=5)
+        tasks = self.curriculum.sample_tasks(batch_size=5)
         if not tasks:
             return
 
@@ -381,6 +399,11 @@ class MasterLoop:
         assert self.vram_scheduler is not None
         self._loop_status["loop3_rl"] = "waiting"
         logger.info("Loop 3 (RL) started — waiting for overnight window")
+
+        # Wait for Loop 1 to finish initial population + at least one GEPA cycle
+        # before stealing the GPU for RL training
+        logger.info("Loop 3: waiting 5 minutes for Loop 1/2 to collect initial data...")
+        await asyncio.sleep(300)
 
         try:
             while not self._shutdown_event.is_set():

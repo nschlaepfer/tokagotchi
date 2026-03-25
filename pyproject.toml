@@ -12,6 +12,7 @@ dependencies = [
     "wandb>=0.16",           # Experiment tracking
     "numpy>=1.26",           # Numerical ops
     "jsonlines>=4.0",        # JSONL read/write
+    "aiohttp>=3.9",          # Async HTTP (Ollama health checks)
 ]
 
 [project.optional-dependencies]
@@ -36,7 +37,7 @@ qsi-all = "scripts.run_all:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]

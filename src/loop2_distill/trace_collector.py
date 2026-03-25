@@ -260,7 +260,7 @@ class TraceCollector:
         Uses AgentArenaGame for the episode and drives Qwen via the
         vLLM chat completion API.
         """
-        game = AgentArenaGame(docker_mgr=arena_manager)
+        game = AgentArenaGame(arena_mgr=arena_manager)
 
         async with game:
             initial_obs = await game.reset(task)

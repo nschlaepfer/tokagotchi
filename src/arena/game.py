@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Any
 
-from src.arena.docker_manager import DockerManager
 from src.arena.tools import bash_tool, python_tool, file_tool, submit_tool
 from src.arena.tools.common import ToolResult
 from src.arena.tools.sql_tool import execute as sql_execute
@@ -22,6 +21,11 @@ from src.arena.tools.api_tool import execute as api_execute
 from src.models import ActionType, StepRecord, TaskSpec, Trajectory
 
 logger = logging.getLogger(__name__)
+
+# Type alias — both DockerManager and SubprocessManager implement the same
+# async_create_container / async_exec_in_container / async_destroy_container API.
+# We use Any here to avoid circular imports; runtime duck-typing is fine.
+ArenaManagerLike = Any
 
 # Regex to parse "[action_type]: content" or "action_type: content"
 _ACTION_PATTERN = re.compile(
@@ -45,13 +49,15 @@ class StepResult:
 class AgentArenaGame:
     """Game environment for a single agent episode.
 
-    Manages the full lifecycle: container creation, action dispatch,
+    Manages the full lifecycle: container/sandbox creation, action dispatch,
     trajectory recording, and cleanup.
 
     Parameters
     ----------
-    docker_mgr:
-        DockerManager instance for container operations.
+    arena_mgr:
+        Any arena manager (DockerManager or SubprocessManager) that
+        implements async_create_container, async_exec_in_container,
+        and async_destroy_container.
     max_tool_calls:
         Maximum number of tool-executing steps before the episode is
         forcibly terminated.
@@ -59,10 +65,10 @@ class AgentArenaGame:
 
     def __init__(
         self,
-        docker_mgr: DockerManager,
+        arena_mgr: ArenaManagerLike,
         max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     ) -> None:
-        self._docker_mgr = docker_mgr
+        self._docker_mgr = arena_mgr  # kept as _docker_mgr for minimal internal churn
         self._max_tool_calls = max_tool_calls
 
         self._container_id: str | None = None

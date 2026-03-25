@@ -41,3 +41,26 @@ models/
 
 # WandB
 wandb/
+
+# Budget state (contains spend history)
+data/budget_state.json
+
+# Loop 1 evolution state (regenerated)
+data/loop1_gepa/
+
+# Experiment branches metadata
+data/experiments/
+
+# Docker arena temp files
+docker/*.tar
+
+# Conversion working files
+data/conversion/
+
+# Secrets / API keys
+.env
+.env.*
+*.key
+
+# Jupyter
+.ipynb_checkpoints/

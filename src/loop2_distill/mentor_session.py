@@ -90,7 +90,7 @@ class MentorSession:
         """
         from src.arena.game import AgentArenaGame
 
-        game = AgentArenaGame(docker_mgr=arena_manager)
+        game = AgentArenaGame(arena_mgr=arena_manager)
         training_examples: list[dict[str, Any]] = []
 
         async with game:

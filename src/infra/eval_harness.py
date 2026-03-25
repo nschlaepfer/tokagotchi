@@ -76,7 +76,7 @@ class EvalHarness:
         for task in tasks:
             try:
                 game = AgentArenaGame(
-                    docker_mgr=arena_manager,
+                    arena_mgr=arena_manager,
                 )
                 async with game:
                     await game.setup(task)
