@@ -79,7 +79,7 @@ async def main(args: argparse.Namespace) -> None:
         persist_path=data_dir / "budget_state.json",
     )
     opus_client = OpusClient(config=cfg.opus, budget_tracker=budget_tracker)
-    vllm_server = VLLMServer(cfg.model, log_dir=data_dir / "logs")
+    vllm_server = VLLMServer(cfg.model)
     vram_scheduler = VRAMScheduler(vllm_server)
 
     # Arena sandbox: auto-detect Docker, fall back to subprocess

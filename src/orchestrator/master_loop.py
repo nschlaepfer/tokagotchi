@@ -161,7 +161,7 @@ class MasterLoop:
         )
 
         # vLLM server
-        self.vllm_server = VLLMServer(cfg.model, log_dir=data_dir / "logs")
+        self.vllm_server = VLLMServer(cfg.model)
 
         # VRAM scheduler
         self.vram_scheduler = VRAMScheduler(self.vllm_server)
