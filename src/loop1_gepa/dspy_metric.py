@@ -49,12 +49,16 @@ def arena_metric(
     trace: Any = None,
     pred_name: str | None = None,
     pred_trace: Any = None,
-) -> dict[str, Any]:
+) -> float:
     """Evaluate an agent's prediction against a task in a sandbox.
 
     This is the core metric function passed to ``dspy.GEPA(metric=...)``.
     It spins up a sandbox, runs the agent's solution, checks test commands,
-    and generates feedback for GEPA's reflection LM.
+    and returns a scalar score.
+
+    GEPA gets trace-aware feedback through DSPy's built-in trace capture
+    mechanism (when ``trace is not None``), not through the metric return.
+    The metric MUST return a float for DSPy's progress tracking to work.
 
     Parameters
     ----------
@@ -67,8 +71,8 @@ def arena_metric(
 
     Returns
     -------
-    dict
-        ``{"score": float, "feedback": str}``
+    float
+        Score between 0.0 and 1.0.
     """
     global _arena_manager
     if _arena_manager is None:
@@ -83,11 +87,7 @@ def arena_metric(
     if task_spec is None:
         # Can't run test commands without TaskSpec — score based on output quality
         has_answer = len(solution.strip()) > 10
-        return {
-            "score": 0.3 if has_answer else 0.0,
-            "feedback": "No TaskSpec available for automated testing. "
-                        f"Agent produced {'a response' if has_answer else 'no meaningful response'}.",
-        }
+        return 0.3 if has_answer else 0.0
 
     # Create sandbox and run test commands
     try:
@@ -129,14 +129,12 @@ def arena_metric(
             test_score, format_score, pred, trace
         )
 
-        return {"score": round(score, 4), "feedback": feedback}
+        logger.debug("Metric score=%.4f for task: %s", score, task_desc[:60])
+        return round(score, 4)
 
     except Exception as e:
         logger.warning("Metric evaluation failed: %s", e)
-        return {
-            "score": 0.0,
-            "feedback": f"Evaluation crashed: {e}. The agent may have produced invalid output.",
-        }
+        return 0.0
     finally:
         try:
             _arena_manager.destroy_container(sandbox_id)
