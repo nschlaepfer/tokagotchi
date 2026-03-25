@@ -107,20 +107,23 @@ class DspyGEPAEngine:
             max_tokens=2048,
         )
 
-        # Configure reflection LM (Claude Opus)
+        # Configure reflection LM (Claude Opus via CLI)
+        # Uses the Claude CLI's built-in auth — no ANTHROPIC_API_KEY needed.
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            logger.warning(
-                "ANTHROPIC_API_KEY not set. GEPA reflection will fail. "
-                "Set it via: export ANTHROPIC_API_KEY=your_key"
+        if api_key:
+            # Direct API access (faster, preferred)
+            self._reflection_lm = dspy.LM(
+                model=f"anthropic/{self.config.opus.model}",
+                api_key=api_key,
+                temperature=1.0,
+                max_tokens=4096,
             )
-
-        self._reflection_lm = dspy.LM(
-            model=f"anthropic/{self.config.opus.model}",
-            api_key=api_key,
-            temperature=1.0,
-            max_tokens=4096,
-        )
+            logger.info("Reflection LM: direct Anthropic API")
+        else:
+            # Fall back to Claude CLI wrapper (uses CLI auth)
+            from src.loop1_gepa.claude_cli_lm import ClaudeCliLM
+            self._reflection_lm = ClaudeCliLM(model=self.config.opus.model)
+            logger.info("Reflection LM: Claude CLI (no API key, using CLI auth)")
 
         # Set student as default
         dspy.configure(lm=self._student_lm)
