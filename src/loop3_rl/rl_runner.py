@@ -775,22 +775,32 @@ class RLRunner:
         Focuses on tasks with intermediate success rates (the productive
         learning frontier).
         """
+        n = config.train_batch_size * config.total_epochs
+
+        # Try SECEngine.sample_tasks(batch_size=n) first
         try:
-            # SECEngine.sample_batch returns tasks weighted toward the frontier
-            tasks = curriculum_engine.sample_batch(
-                n=config.train_batch_size * config.total_epochs,
-            )
-            return tasks
-        except AttributeError:
-            logger.warning(
-                "Curriculum engine does not support sample_batch; "
-                "falling back to get_active_tasks"
-            )
-            try:
-                return curriculum_engine.get_active_tasks()
-            except Exception:
-                logger.error("Failed to sample tasks from curriculum", exc_info=True)
-                return []
+            tasks = curriculum_engine.sample_tasks(batch_size=n)
+            if tasks:
+                logger.info("Sampled %d tasks via sample_tasks", len(tasks))
+                return tasks[:n]
+        except Exception:
+            logger.debug("sample_tasks failed", exc_info=True)
+
+        # Fallback: load seed tasks directly from disk
+        try:
+            from src.infra.eval_harness import EvalHarness
+            harness = EvalHarness()
+            seed_path = Path("data/curriculum/seed_tasks.json")
+            if seed_path.exists():
+                tasks = harness.load_benchmark_tasks(str(seed_path))
+                if tasks:
+                    logger.info("Loaded %d seed tasks as fallback", len(tasks))
+                    return tasks[:n]
+        except Exception:
+            logger.debug("Seed task fallback failed", exc_info=True)
+
+        logger.error("No tasks available for RL training")
+        return []
 
 
 # ---------------------------------------------------------------------------
