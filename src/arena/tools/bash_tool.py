@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-from src.arena.docker_manager import DockerManager
+from typing import Any
+
 from src.arena.tools.common import ToolResult
 
 # Commands that are never allowed, even inside longer pipelines.
@@ -32,7 +33,7 @@ def _is_blocked(command: str) -> str | None:
 
 
 async def execute(
-    docker_mgr: DockerManager,
+    docker_mgr: Any,
     container_id: str,
     command: str,
     timeout: int = DEFAULT_TIMEOUT,

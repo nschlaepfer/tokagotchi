@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import shlex
 
-from src.arena.docker_manager import DockerManager
+from typing import Any
+
 from src.arena.tools.common import ToolResult
 
 DEFAULT_TIMEOUT = 15
@@ -32,7 +33,7 @@ def _is_supported(endpoint: str) -> bool:
 
 
 async def execute(
-    docker_mgr: DockerManager,
+    docker_mgr: Any,
     container_id: str,
     endpoint: str,
     params: str = "",

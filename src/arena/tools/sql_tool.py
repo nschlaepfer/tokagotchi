@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import re
 
-from src.arena.docker_manager import DockerManager
+from typing import Any
+
 from src.arena.tools.common import ToolResult
 
 DEFAULT_TIMEOUT = 15
@@ -38,7 +39,7 @@ def _is_dangerous(query: str) -> str | None:
 
 
 async def execute(
-    docker_mgr: DockerManager,
+    docker_mgr: Any,
     container_id: str,
     query: str,
     *,

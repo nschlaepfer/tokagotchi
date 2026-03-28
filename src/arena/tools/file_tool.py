@@ -7,22 +7,38 @@ from __future__ import annotations
 
 import posixpath
 
-from src.arena.docker_manager import DockerManager
+from typing import Any
+
 from src.arena.tools.common import ToolResult
 
 WORKSPACE_ROOT = "/workspace"
 
 
-def _validate_path(path: str) -> str | None:
-    """Return an error message if the path is not under /workspace, else None."""
+def _validate_and_relativize(path: str) -> tuple[str | None, str]:
+    """Validate path is under /workspace and return (error, relative_path).
+
+    Accepts:
+    - /workspace/foo.py → foo.py
+    - foo.py → foo.py  (already relative)
+    - src/foo.py → src/foo.py  (already relative)
+
+    Returns (error_msg, relative_path). error_msg is None on success.
+    """
     normalized = posixpath.normpath(path)
-    if not normalized.startswith(WORKSPACE_ROOT):
-        return f"Path must be under {WORKSPACE_ROOT}, got: {path}"
-    return None
+    if normalized.startswith(WORKSPACE_ROOT + "/"):
+        return None, posixpath.relpath(normalized, WORKSPACE_ROOT)
+    elif normalized == WORKSPACE_ROOT:
+        return None, "."
+    elif normalized.startswith("/"):
+        # Absolute path outside /workspace — reject
+        return f"Path must be under {WORKSPACE_ROOT}, got: {path}", ""
+    else:
+        # Already relative — allow it
+        return None, normalized
 
 
 async def read_file(
-    docker_mgr: DockerManager,
+    docker_mgr: Any,
     container_id: str,
     path: str,
 ) -> ToolResult:
@@ -36,13 +52,15 @@ async def read_file(
     Returns:
         ToolResult with file contents in stdout.
     """
-    error = _validate_path(path)
+    error, rel_path = _validate_and_relativize(path)
     if error is not None:
         return ToolResult(stdout="", stderr=error, exit_code=1, truncated=False)
 
     try:
+        # Use relative path — works in both Docker (/workspace is cwd) and
+        # SubprocessManager (temp dir workspace is cwd)
         stdout, stderr, exit_code = await docker_mgr.async_exec_in_container(
-            container_id, f"cat {path}", timeout=10
+            container_id, f"cat {rel_path}", timeout=10
         )
     except TimeoutError:
         return ToolResult(
@@ -58,7 +76,7 @@ async def read_file(
 
 
 async def write_file(
-    docker_mgr: DockerManager,
+    docker_mgr: Any,
     container_id: str,
     path: str,
     content: str,
@@ -74,14 +92,11 @@ async def write_file(
     Returns:
         ToolResult confirming the write.
     """
-    error = _validate_path(path)
+    error, relative = _validate_and_relativize(path)
     if error is not None:
         return ToolResult(stdout="", stderr=error, exit_code=1, truncated=False)
 
-    # Ensure parent directory exists, then write via heredoc
-    dir_path = posixpath.dirname(path)
     # Use copy_files_to_container for reliable writes
-    relative = posixpath.relpath(path, WORKSPACE_ROOT)
     try:
         await docker_mgr.async_copy_files_to_container(
             container_id, {relative: content}

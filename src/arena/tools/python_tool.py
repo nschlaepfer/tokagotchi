@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from src.arena.docker_manager import DockerManager
+from typing import Any
+
 from src.arena.tools.common import ToolResult
 
 DEFAULT_TIMEOUT = 30
@@ -12,7 +13,7 @@ MAX_OUTPUT_CHARS = 10_000
 
 
 async def execute(
-    docker_mgr: DockerManager,
+    docker_mgr: Any,
     container_id: str,
     code: str,
     timeout: int = DEFAULT_TIMEOUT,
@@ -28,16 +29,16 @@ async def execute(
     Returns:
         ToolResult with captured stdout, stderr, and exit code.
     """
-    script_name = f"/tmp/_agent_script_{uuid.uuid4().hex[:8]}.py"
+    script_name = f"_agent_script_{uuid.uuid4().hex[:8]}.py"
 
-    # Write the code into the container
+    # Write the code into the container workspace
     await docker_mgr.async_copy_files_to_container(
         container_id,
-        {script_name.lstrip("/"): code},
+        {script_name: code},
     )
 
-    # Execute with python3, capturing both stdout and stderr
-    command = f"python3 {script_name} 2>&1; echo '::EXIT_CODE::'$?"
+    # Execute from workspace (both Docker and SubprocessManager set cwd there)
+    command = f"python {script_name} 2>&1; echo '::EXIT_CODE::'$?"
     try:
         raw_stdout, _, _ = await docker_mgr.async_exec_in_container(
             container_id, command, timeout=timeout

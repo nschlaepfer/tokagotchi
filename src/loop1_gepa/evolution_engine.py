@@ -96,7 +96,7 @@ class GEPAEngine:
         config: MasterConfig,
         opus_client: OpusClient,
         vllm_server: VLLMServer,
-        arena_manager: DockerManager,
+        arena_manager: Any,
         tasks: list[TaskSpec] | None = None,
         data_dir: str | Path | None = None,
     ) -> None:

@@ -27,11 +27,20 @@ logger = logging.getLogger(__name__)
 # We use Any here to avoid circular imports; runtime duck-typing is fine.
 ArenaManagerLike = Any
 
-# Regex to parse "[action_type]: content" or "action_type: content"
+# Primary: "[action_type]: content" or "action_type: content"
 _ACTION_PATTERN = re.compile(
     r"^\[?(?P<action_type>[a-z_]+)\]?\s*:\s*(?P<content>.*)",
     re.DOTALL | re.IGNORECASE,
 )
+
+# Fallback: "[action_type content]" (no colon, content inside brackets)
+_ACTION_BRACKET_PATTERN = re.compile(
+    r"^\[(?P<action_type>[a-z_]+)\s+(?P<content>[^\]]+)\]",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Strip <think>...</think> blocks that Qwen sometimes prepends
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 DEFAULT_MAX_TOOL_CALLS = 20
 
@@ -300,13 +309,25 @@ class AgentArenaGame:
         """Parse a raw action string into (ActionType, content).
 
         Supports formats:
-        - ``[action_type]: content``
-        - ``action_type: content``
+        - ``[action_type]: content``  (primary)
+        - ``action_type: content``    (primary)
+        - ``[action_type content]``   (bracket, no colon)
+        - Any of the above preceded by ``<think>...</think>`` blocks
 
         Falls back to THINK if parsing fails.
         """
         action = action.strip()
-        match = _ACTION_PATTERN.match(action)
+
+        # Strip <think>...</think> blocks that Qwen prepends
+        cleaned = _THINK_BLOCK_RE.sub("", action).strip()
+        if not cleaned:
+            cleaned = action  # Don't lose everything if regex over-strips
+
+        # Try primary pattern first
+        match = _ACTION_PATTERN.match(cleaned)
+        if match is None:
+            # Try bracket pattern: [action_type content]
+            match = _ACTION_BRACKET_PATTERN.match(cleaned)
         if match is None:
             logger.warning("Could not parse action, treating as think: %s", action[:80])
             return ActionType.THINK, action

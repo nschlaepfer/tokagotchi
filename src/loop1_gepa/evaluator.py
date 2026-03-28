@@ -360,7 +360,7 @@ async def evaluate_genome(
     genome: PromptGenome,
     tasks: list[TaskSpec],
     vllm_server: VLLMServer,
-    arena_manager: DockerManager,
+    arena_manager: Any,
     *,
     max_concurrent: int = 4,
     max_steps_per_task: int = MAX_STEPS_DEFAULT,
