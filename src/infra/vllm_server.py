@@ -155,7 +155,7 @@ class LLMServer:
         max_tokens: int = 2048,
         stop: str | list[str] | None = None,
         top_p: float = 1.0,
-        think: bool = False,
+        think: bool = True,
         **kwargs: Any,
     ) -> openai.types.chat.ChatCompletion:
         """Send a chat-completion request to the local Ollama server.
@@ -163,32 +163,22 @@ class LLMServer:
         Parameters
         ----------
         think:
-            If False (default), disables Qwen 3.5's thinking mode via the
-            native Ollama API so responses appear in the ``content`` field.
-            If True, uses the OpenAI-compatible endpoint and content may be
-            in the ``reasoning`` field instead.
+            If True (default), enables Qwen 3.5's thinking mode. The model
+            puts reasoning in the ``thinking`` field and the action in
+            ``content``. This is REQUIRED for qwen3.5-abliterated which
+            cannot produce content without thinking first.
         """
         self._ensure_ready()
 
-        if not think:
-            # Use native Ollama API with think=false for direct responses
-            result = await self._native_chat(
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                top_p=top_p,
-                think=False,
-            )
-            # Log raw response for debugging empty content issues
-            raw_content = result.get("message", {}).get("content", "")
-            if not raw_content.strip():
-                logger.debug(
-                    "Ollama returned empty content. eval_count=%s, message=%s",
-                    result.get("eval_count", "?"),
-                    repr(result.get("message", {}))[:300],
-                )
-            # Wrap in a ChatCompletion-like response for compatibility
-            return _wrap_native_response(result)
+        # Always use native Ollama API (supports think parameter)
+        result = await self._native_chat(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            think=think,
+        )
+        return _wrap_native_response(result)
 
         assert self._client is not None
         response = await self._client.chat.completions.create(
