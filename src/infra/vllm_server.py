@@ -179,6 +179,14 @@ class LLMServer:
                 top_p=top_p,
                 think=False,
             )
+            # Log raw response for debugging empty content issues
+            raw_content = result.get("message", {}).get("content", "")
+            if not raw_content.strip():
+                logger.debug(
+                    "Ollama returned empty content. eval_count=%s, message=%s",
+                    result.get("eval_count", "?"),
+                    repr(result.get("message", {}))[:300],
+                )
             # Wrap in a ChatCompletion-like response for compatibility
             return _wrap_native_response(result)
 
