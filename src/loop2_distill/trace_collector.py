@@ -312,6 +312,11 @@ class TraceCollector:
             )
 
             assistant_msg = completion.choices[0].message.content or ""
+            if not assistant_msg.strip():
+                logger.debug(
+                    "Empty LLM response (raw choice: %s)",
+                    repr(completion.choices[0])[:200],
+                )
             messages.append({"role": "assistant", "content": assistant_msg})
 
             # Execute the action in the arena

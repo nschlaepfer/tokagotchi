@@ -38,12 +38,12 @@ MAX_STEPS_DEFAULT = 20
 AGENT_TIMEOUT_SECONDS = 120
 MAX_OBSERVATION_CHARS = 4000
 
+# ---------------------------------------------------------------------------
 # Regex patterns for parsing Qwen's action output.
-# Expected format:
-#   [action_type]
-#   content here
-# or:
-#   [action_type: content here]
+# Qwen3.5 produces many formats; we try them in priority order.
+# ---------------------------------------------------------------------------
+
+# 1. Structured bracket: [action_type: content] or [action_type]\ncontent
 _ACTION_BLOCK_RE = re.compile(
     r"\[(?P<action_type>think|bash|python|read_file|write_file|sql|api_call|submit)"
     r"(?::?\s*(?P<inline_content>[^\]]*))?\]"
@@ -51,11 +51,27 @@ _ACTION_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Fallback: look for fenced code blocks with a tool label
+# 2. Fenced code blocks with a tool label
 _FENCED_BLOCK_RE = re.compile(
     r"```(?P<action_type>bash|python)\n(?P<content>[\s\S]*?)```",
     re.IGNORECASE,
 )
+
+# 3. Line-level: "action_type: content" or "[action_type]: content" on any line
+_LINE_ACTION_RE = re.compile(
+    r"^\[?(?P<action_type>[a-z_]+)\]?\s*:\s*(?P<content>.*)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# 4. Bracket without colon: [action_type content]
+_BRACKET_ACTION_RE = re.compile(
+    r"^\[(?P<action_type>[a-z_]+)\s+(?P<content>[^\]]+)\]",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Strip think blocks/tags
+_THINK_STRIP_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+_THINK_ORPHAN_RE = re.compile(r"^</think>\s*", re.DOTALL)
 
 
 # ---------------------------------------------------------------------------
@@ -66,11 +82,15 @@ _FENCED_BLOCK_RE = re.compile(
 def _parse_actions(raw_output: str) -> list[tuple[ActionType, str]]:
     """Parse Qwen's raw text output into a list of (action_type, content) pairs.
 
-    Tries structured bracket format first, then falls back to fenced code blocks.
+    Tries multiple strategies in order:
+    1. Structured bracket format: [action_type: content] or [action_type]\ncontent
+    2. Fenced code blocks: ```bash\ncontent```
+    3. Line-level scan (after stripping <think> tags): action_type: content
     If nothing is detected, returns a single THINK action with the full text.
     """
     actions: list[tuple[ActionType, str]] = []
 
+    # Strategy 1: structured bracket format
     for m in _ACTION_BLOCK_RE.finditer(raw_output):
         action_str = m.group("action_type").lower()
         content = (
@@ -83,15 +103,50 @@ def _parse_actions(raw_output: str) -> list[tuple[ActionType, str]]:
             content = m.group(0)
         actions.append((action_type, content))
 
-    if not actions:
-        for m in _FENCED_BLOCK_RE.finditer(raw_output):
+    if actions:
+        return actions
+
+    # Strategy 2: fenced code blocks
+    for m in _FENCED_BLOCK_RE.finditer(raw_output):
+        action_str = m.group("action_type").lower()
+        content = m.group("content").strip()
+        try:
+            action_type = ActionType(action_str)
+        except ValueError:
+            continue
+        actions.append((action_type, content))
+
+    if actions:
+        return actions
+
+    # Strategy 3: strip <think> tags and scan lines for action patterns
+    cleaned = _THINK_STRIP_RE.sub("", raw_output)
+    cleaned = _THINK_ORPHAN_RE.sub("", cleaned).strip()
+    if not cleaned:
+        cleaned = raw_output.strip()
+
+    for line in cleaned.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        m = _LINE_ACTION_RE.match(line)
+        if m is None:
+            m = _BRACKET_ACTION_RE.match(line)
+        if m:
             action_str = m.group("action_type").lower()
             content = m.group("content").strip()
             try:
                 action_type = ActionType(action_str)
+                actions.append((action_type, content))
+                # For multi-line content (write_file), grab remaining lines
+                if action_type == ActionType.WRITE_FILE:
+                    line_idx = cleaned.split("\n").index(line.strip())
+                    remaining = "\n".join(cleaned.split("\n")[line_idx + 1:])
+                    if remaining.strip():
+                        actions[-1] = (action_type, content + "\n" + remaining)
+                break  # Take the first valid action
             except ValueError:
                 continue
-            actions.append((action_type, content))
 
     if not actions:
         actions.append((ActionType.THINK, raw_output.strip()))
