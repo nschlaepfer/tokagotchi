@@ -318,10 +318,23 @@ class EvalHarness:
                 {
                     "trajectory_id": t.trajectory_id,
                     "task_id": t.task.task_id if t.task else None,
+                    "task_description": t.task.description if t.task else None,
                     "success": t.success,
                     "num_steps": t.num_steps,
                     "total_reward": t.total_reward,
                     "wall_time_seconds": t.wall_time_seconds,
+                    "action_types_used": list(t.action_types_used),
+                    "steps": [
+                        {
+                            "step_idx": s.step_idx,
+                            "action_type": s.action_type.value,
+                            "action_content": s.action_content[:500],
+                            "observation": s.observation[:500],
+                            "reasoning": s.reasoning[:300],
+                            "reward": s.reward,
+                        }
+                        for s in t.steps
+                    ],
                 }
                 for t in result.trajectories
             ],

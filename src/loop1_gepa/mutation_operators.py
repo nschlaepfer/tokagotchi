@@ -304,7 +304,9 @@ async def propose_mutation(
         data.get("rationale", "")[:120],
     )
 
-    # Build the mutated genome
+    # Build the mutated genome with full lineage metadata
+    import time as _time
+
     mutated = PromptGenome(
         genome_id=uuid.uuid4().hex[:8],
         system_prompt=data.get("system_prompt", genome.system_prompt),
@@ -315,6 +317,10 @@ async def propose_mutation(
         generation=genome.generation + 1,
         parent_ids=[genome.genome_id],
         scores={},
+        mutation_type=mutation_type.value,
+        mutation_diagnosis=data.get("diagnosis", "")[:500],
+        mutation_rationale=data.get("rationale", "")[:500],
+        created_at=_time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
 
     return mutation_type, mutated

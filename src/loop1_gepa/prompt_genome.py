@@ -32,6 +32,10 @@ def genome_to_dict(g: PromptGenome) -> dict[str, Any]:
         "generation": g.generation,
         "parent_ids": g.parent_ids,
         "scores": g.scores,
+        "mutation_type": g.mutation_type,
+        "mutation_diagnosis": g.mutation_diagnosis,
+        "mutation_rationale": g.mutation_rationale,
+        "created_at": g.created_at,
     }
 
 
@@ -47,6 +51,10 @@ def dict_to_genome(d: dict[str, Any]) -> PromptGenome:
         generation=d.get("generation", 0),
         parent_ids=d.get("parent_ids", []),
         scores=d.get("scores", {}),
+        mutation_type=d.get("mutation_type", ""),
+        mutation_diagnosis=d.get("mutation_diagnosis", ""),
+        mutation_rationale=d.get("mutation_rationale", ""),
+        created_at=d.get("created_at", ""),
     )
 
 

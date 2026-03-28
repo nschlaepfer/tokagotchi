@@ -123,6 +123,7 @@ class GEPAEngine:
         self._population_path = self.data_dir / "population.json"
         self._frontier_path = self.data_dir / "frontier.json"
         self._history_path = self.data_dir / "history.json"
+        self._mutation_log_path = self.data_dir / "mutation_log.jsonl"
 
     # ------------------------------------------------------------------
     # Initialization
@@ -356,7 +357,40 @@ class GEPAEngine:
             record.mutation_types.append(mutation_type.value)
             record.mutations_succeeded += 1
 
+            # Append to persistent mutation log (JSONL)
+            self._log_mutation(mutated, mutation_type)
+
         return offspring
+
+    def _log_mutation(
+        self, genome: PromptGenome, mutation_type: MutationOperator
+    ) -> None:
+        """Append a mutation event to the JSONL mutation log."""
+        import json as _json
+
+        entry = {
+            "timestamp": genome.created_at or time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "genome_id": genome.genome_id,
+            "parent_ids": genome.parent_ids,
+            "generation": genome.generation,
+            "mutation_type": mutation_type.value,
+            "diagnosis": genome.mutation_diagnosis,
+            "rationale": genome.mutation_rationale,
+            "parent_scores": {},
+        }
+
+        # Include parent's scores if available
+        if genome.parent_ids:
+            for p in self.population:
+                if p.genome_id == genome.parent_ids[0]:
+                    entry["parent_scores"] = p.scores
+                    break
+
+        try:
+            with open(self._mutation_log_path, "a", encoding="utf-8") as f:
+                f.write(_json.dumps(entry) + "\n")
+        except Exception:
+            logger.debug("Failed to write mutation log entry", exc_info=True)
 
     def _get_latest_eval(self, genome: PromptGenome) -> EvalResult | None:
         """Retrieve or construct an EvalResult for a genome.
