@@ -39,8 +39,9 @@ _ACTION_BRACKET_PATTERN = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Strip <think>...</think> blocks that Qwen sometimes prepends
+# Strip <think>...</think> blocks and orphaned tags that Qwen prepends
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+_THINK_ORPHAN_RE = re.compile(r"^</think>\s*", re.DOTALL)
 
 DEFAULT_MAX_TOOL_CALLS = 20
 
@@ -318,8 +319,9 @@ class AgentArenaGame:
         """
         action = action.strip()
 
-        # Strip <think>...</think> blocks that Qwen prepends
-        cleaned = _THINK_BLOCK_RE.sub("", action).strip()
+        # Strip <think>...</think> blocks and orphaned </think> tags
+        cleaned = _THINK_BLOCK_RE.sub("", action)
+        cleaned = _THINK_ORPHAN_RE.sub("", cleaned).strip()
         if not cleaned:
             cleaned = action  # Don't lose everything if regex over-strips
 
