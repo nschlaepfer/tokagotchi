@@ -325,11 +325,26 @@ class AgentArenaGame:
         if not cleaned:
             cleaned = action  # Don't lose everything if regex over-strips
 
-        # Try primary pattern first
+        # Try primary pattern on full cleaned text
         match = _ACTION_PATTERN.match(cleaned)
         if match is None:
             # Try bracket pattern: [action_type content]
             match = _ACTION_BRACKET_PATTERN.match(cleaned)
+
+        # Fallback: Qwen often puts reasoning text before the action on a
+        # later line, e.g. "Let me check...\n\n[bash]: ls". Scan each line.
+        if match is None:
+            for line in cleaned.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                m = _ACTION_PATTERN.match(line)
+                if m is None:
+                    m = _ACTION_BRACKET_PATTERN.match(line)
+                if m:
+                    match = m
+                    break
+
         if match is None:
             logger.warning("Could not parse action, treating as think: %s", action[:80])
             return ActionType.THINK, action
