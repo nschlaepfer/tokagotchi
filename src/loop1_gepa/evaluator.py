@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_STEPS_DEFAULT = 20
-AGENT_TIMEOUT_SECONDS = 120
+AGENT_TIMEOUT_SECONDS = 300  # 5 min: thinking models need more time per turn
 MAX_OBSERVATION_CHARS = 4000
 
 # ---------------------------------------------------------------------------

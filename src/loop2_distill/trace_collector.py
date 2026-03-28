@@ -55,7 +55,7 @@ class TraceCollector:
     def __init__(
         self,
         concurrency: int = 4,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 300.0,
     ) -> None:
         self.concurrency = concurrency
         self.timeout_seconds = timeout_seconds
