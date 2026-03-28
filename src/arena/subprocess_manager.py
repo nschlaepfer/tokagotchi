@@ -26,6 +26,36 @@ DEFAULT_EXEC_TIMEOUT = 30
 WORKSPACE_SUBDIR = "workspace"
 
 # ---------------------------------------------------------------------------
+# Python shim: ensure 'python' command is available even if only python3 exists
+# ---------------------------------------------------------------------------
+
+_PYTHON_SHIM_DIR: str | None = None
+_shim_checked = False
+
+
+def _ensure_python_shim() -> None:
+    """Create a 'python' shim so that 'python' maps to 'python3' in bash.
+
+    On many systems (especially Windows with Git Bash / MSYS2), 'python3'
+    is on PATH but 'python' is not.  We create a tiny shell script that
+    delegates to python3.
+    """
+    global _PYTHON_SHIM_DIR, _shim_checked
+    if _shim_checked:
+        return
+    _shim_checked = True
+
+    shim_dir = tempfile.mkdtemp(prefix="arena-pyshim-")
+    shim_path = os.path.join(shim_dir, "python")
+    # Use 'exec python3' — bash will resolve python3 from its own PATH
+    with open(shim_path, "w", newline="\n") as f:
+        f.write('#!/bin/bash\nexec python3 "$@"\n')
+    os.chmod(shim_path, 0o755)
+
+    _PYTHON_SHIM_DIR = shim_dir
+    logger.info("Created python->python3 shim at %s", shim_dir)
+
+# ---------------------------------------------------------------------------
 # Safety: blocked command patterns (mirrors bash_tool.py)
 # ---------------------------------------------------------------------------
 
@@ -145,11 +175,17 @@ class SubprocessManager:
             return ("", f"Unknown sandbox: {container_id}", 1)
 
         try:
+            env = os.environ.copy()
+            # Ensure 'python' resolves: add a shim dir to PATH if needed
+            _ensure_python_shim()
+            if _PYTHON_SHIM_DIR:
+                env["PATH"] = _PYTHON_SHIM_DIR + os.pathsep + env.get("PATH", "")
             proc = await asyncio.create_subprocess_exec(
                 "bash", "-c", command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=info.workspace,
+                env=env,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout,
