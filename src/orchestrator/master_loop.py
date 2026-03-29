@@ -320,7 +320,7 @@ class MasterLoop:
                         self._loop_status["loop2_distill"] = "training"
 
                         # Drain training examples from the buffer
-                        training_data = self._pending_buffer.drain()
+                        training_data = self._pending_buffer.get_training_batch()
 
                         # Transition to training phase (stop vLLM)
                         await self.vram_scheduler.enter_training_phase()
@@ -354,6 +354,13 @@ class MasterLoop:
                     else:
                         # Collect more traces if Loop 1 is running
                         await self._collect_traces_for_buffer()
+
+                        # Persist buffer to disk after each collection round
+                        if self._pending_buffer.size() > 0:
+                            self._pending_buffer.save()
+                            logger.debug(
+                                "Buffer saved: %d examples", self._pending_buffer.size()
+                            )
 
                 except Exception:
                     logger.exception("Loop 2 error")
@@ -417,9 +424,10 @@ class MasterLoop:
                                     metadata=ex["metadata"],
                                 )
                             logger.info(
-                                "SDPO: %d contrastive pairs from trajectory %s",
+                                "SDPO: %d contrastive pairs from trajectory %s (buffer=%d)",
                                 len(pairs),
                                 traj.trajectory_id[:12],
+                                self._pending_buffer.size(),
                             )
                             # Track in wandb
                             avg_div = sum(p.weight for p in pairs) / len(pairs) if pairs else 0
@@ -447,13 +455,21 @@ class MasterLoop:
                                     if traj.task
                                     else "unknown"
                                 )
+                                # ex has {"messages": [...], "metadata": {...}}
+                                # Buffer expects example=dict with messages key
                                 self._pending_buffer.add(
                                     example=ex,
                                     metadata={
                                         "task_type": task_type,
                                         "failure_mode": "opus_corrected",
                                         "source": "opus",
+                                        "difficulty": traj.task.difficulty if traj.task else 0.5,
                                     },
+                                )
+                                logger.info(
+                                    "Opus: corrected trajectory %s (%d steps)",
+                                    traj.trajectory_id[:12],
+                                    len(analysis.corrected_steps),
                                 )
                     except Exception:
                         logger.exception("Opus trace surgery failed")

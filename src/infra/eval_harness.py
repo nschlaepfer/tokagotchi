@@ -79,7 +79,7 @@ class EvalHarness:
                     arena_mgr=arena_manager,
                 )
                 async with game:
-                    await game.setup(task)
+                    await game.reset(task)
                     system_message = genome.to_system_message()
 
                     # Run the agent through the task

@@ -3,8 +3,8 @@ loop2:
   mentor_ratio: 0.80
   min_buffer_size: 10
   max_buffer_size: 5000
-  diversity_min_task_types: 3
-  diversity_min_failure_modes: 3
+  diversity_min_task_types: 2
+  diversity_min_failure_modes: 1
 
   lora:
     rank: 64
