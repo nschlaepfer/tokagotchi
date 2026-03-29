@@ -116,11 +116,9 @@ class BudgetTracker:
             )
             self._records.append(record)
             logger.debug(
-                "Recorded spend $%.4f for loop=%s (hourly=$%.2f, daily=$%.2f)",
+                "Recorded spend $%.4f for loop=%s",
                 amount_usd,
                 loop_id,
-                hourly_total,
-                daily_total,
             )
             self._save()
 
