@@ -19,6 +19,7 @@ from src.arena.tools import bash_tool, file_tool, python_tool, submit_tool
 from src.arena.tools.common import ToolResult
 from src.config import ArenaConfig, Loop1Config
 from src.infra.vllm_server import VLLMServer
+from src.infra import wandb_tracker
 from src.models import (
     ActionType,
     EvalResult,
@@ -531,7 +532,6 @@ async def evaluate_genome(
     )
 
     # Track in wandb
-    from src.infra import wandb_tracker
     wandb_tracker.log_genome_eval(
         genome_id=genome.genome_id,
         generation=genome.generation,

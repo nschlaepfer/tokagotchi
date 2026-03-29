@@ -404,15 +404,15 @@ class MasterLoop:
             genome=self._best_genome,
         )
 
-        # Process failed trajectories: SDPO first (free), Opus fallback (costly)
-        n_success = sum(1 for t in trajectories if t.success)
-        n_failed = sum(1 for t in trajectories if not t.success)
+        # Single pass: count and collect failed trajectories
+        failed = [t for t in trajectories if not t.success]
         logger.info(
             "Trace collection: %d trajectories (%d success, %d failed)",
-            len(trajectories), n_success, n_failed,
+            len(trajectories), len(trajectories) - len(failed), len(failed),
         )
-        for traj in trajectories:
-            if not traj.success:
+
+        # Process failed trajectories: SDPO first (free), Opus fallback (costly)
+        for traj in failed:
                 # SDPO: self-distillation using Qwen's own re-evaluation
                 pairs: list = []
                 if self._sdpo_reevaluator is not None and self._best_genome is not None:
@@ -461,8 +461,6 @@ class MasterLoop:
                                     if traj.task
                                     else "unknown"
                                 )
-                                # ex has {"messages": [...], "metadata": {...}}
-                                # Buffer expects example=dict with messages key
                                 self._pending_buffer.add(
                                     example=ex,
                                     metadata={

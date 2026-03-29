@@ -109,10 +109,10 @@ class LLMServer:
 
         import aiohttp
 
-        # Try up to 3 times to unload — Ollama sometimes needs multiple nudges
-        for attempt in range(3):
-            try:
-                async with aiohttp.ClientSession() as session:
+        # Retry unload with single session — Ollama sometimes needs multiple nudges
+        async with aiohttp.ClientSession() as session:
+            for attempt in range(3):
+                try:
                     async with session.post(
                         f"{self.api_url}/generate",
                         json={"model": self.config.name, "keep_alive": 0},
@@ -122,29 +122,16 @@ class LLMServer:
                             logger.info("Model unload requested (attempt %d)", attempt + 1)
                         else:
                             logger.warning("Model unload returned status %d", resp.status)
-            except Exception as e:
-                logger.warning("Failed to unload model (attempt %d): %s", attempt + 1, e)
+                except Exception as e:
+                    logger.warning("Failed to unload model (attempt %d): %s", attempt + 1, e)
 
-            # Wait for VRAM to actually free
-            await asyncio.sleep(5)
-
-            # Check if model is still loaded
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{self.api_url}/show",
-                        json={"model": self.config.name},
-                        timeout=aiohttp.ClientTimeout(total=5),
-                    ) as resp:
-                        pass
-                # Check GPU memory via nvidia-smi
+                # Wait for VRAM to free, then verify
+                await asyncio.sleep(3)
                 free_mb = await _query_gpu_free_mb()
                 if free_mb and free_mb > 25000:
                     logger.info("GPU memory freed: %.0f MiB available", free_mb)
                     break
-                logger.info("GPU memory still held: %.0f MiB free, retrying...", free_mb or 0)
-            except Exception:
-                break  # Can't check, assume it worked
+                logger.info("GPU still held: %.0f MiB free, retrying...", free_mb or 0)
 
         self._client = None
         self._status = ServerStatus.STOPPED
