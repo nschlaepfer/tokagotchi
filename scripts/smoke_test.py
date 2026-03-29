@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("smoke_test")
 
 
-async def test_ollama() -> bool:
+async def check_ollama() -> bool:
     """Test that Ollama is serving and can do inference."""
     logger.info("=" * 60)
     logger.info("TEST 1: Ollama inference")
@@ -79,7 +79,7 @@ async def test_ollama() -> bool:
         return False
 
 
-async def test_claude_cli() -> bool:
+async def check_claude_cli() -> bool:
     """Test that Claude CLI headless mode works."""
     logger.info("=" * 60)
     logger.info("TEST 2: Claude CLI headless mode")
@@ -117,7 +117,7 @@ async def test_claude_cli() -> bool:
         return False
 
 
-async def test_mini_gepa_cycle() -> bool:
+async def check_mini_gepa_cycle() -> bool:
     """Test a simplified GEPA mutation cycle: Opus analyzes a Qwen response and proposes an improvement."""
     logger.info("=" * 60)
     logger.info("TEST 3: Mini GEPA cycle (Opus analyzes Qwen, proposes mutation)")
@@ -182,11 +182,11 @@ Return ONLY valid JSON, no markdown."""
 async def main() -> None:
     results = {}
 
-    results["ollama"] = await test_ollama()
-    results["claude_cli"] = await test_claude_cli()
+    results["ollama"] = await check_ollama()
+    results["claude_cli"] = await check_claude_cli()
 
     if results["ollama"] and results["claude_cli"]:
-        results["gepa_cycle"] = await test_mini_gepa_cycle()
+        results["gepa_cycle"] = await check_mini_gepa_cycle()
     else:
         logger.warning("Skipping GEPA cycle test — prerequisites failed")
         results["gepa_cycle"] = False

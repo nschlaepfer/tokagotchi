@@ -128,7 +128,7 @@ class LLMServer:
                 # Wait for VRAM to free, then verify
                 await asyncio.sleep(3)
                 free_mb = await _query_gpu_free_mb()
-                if free_mb and free_mb > 25000:
+                if free_mb and free_mb > 30000:
                     logger.info("GPU memory freed: %.0f MiB available", free_mb)
                     break
                 logger.info("GPU still held: %.0f MiB free, retrying...", free_mb or 0)
