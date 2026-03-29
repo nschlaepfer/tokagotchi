@@ -107,21 +107,44 @@ class LLMServer:
         self._status = ServerStatus.STOPPING
         logger.info("Unloading model %s from Ollama ...", self.config.name)
 
-        try:
-            # Ollama API: POST /api/generate with keep_alive=0 unloads the model
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.api_url}/generate",
-                    json={"model": self.config.name, "keep_alive": 0},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status == 200:
-                        logger.info("Model unloaded from GPU")
-                    else:
-                        logger.warning("Model unload returned status %d", resp.status)
-        except Exception as e:
-            logger.warning("Failed to unload model: %s", e)
+        import aiohttp
+
+        # Try up to 3 times to unload — Ollama sometimes needs multiple nudges
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.api_url}/generate",
+                        json={"model": self.config.name, "keep_alive": 0},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        if resp.status == 200:
+                            logger.info("Model unload requested (attempt %d)", attempt + 1)
+                        else:
+                            logger.warning("Model unload returned status %d", resp.status)
+            except Exception as e:
+                logger.warning("Failed to unload model (attempt %d): %s", attempt + 1, e)
+
+            # Wait for VRAM to actually free
+            await asyncio.sleep(5)
+
+            # Check if model is still loaded
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{self.api_url}/show",
+                        json={"model": self.config.name},
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
+                        pass
+                # Check GPU memory via nvidia-smi
+                free_mb = await _query_gpu_free_mb()
+                if free_mb and free_mb > 25000:
+                    logger.info("GPU memory freed: %.0f MiB available", free_mb)
+                    break
+                logger.info("GPU memory still held: %.0f MiB free, retrying...", free_mb or 0)
+            except Exception:
+                break  # Can't check, assume it worked
 
         self._client = None
         self._status = ServerStatus.STOPPED
@@ -455,3 +478,17 @@ def _wrap_native_response(data: dict) -> openai.types.chat.ChatCompletion:
             total_tokens=data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
         ),
     )
+
+
+async def _query_gpu_free_mb() -> float | None:
+    """Quick GPU free memory check via nvidia-smi."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        return float(stdout.decode().strip().split("\n")[0])
+    except Exception:
+        return None
