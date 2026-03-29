@@ -79,14 +79,11 @@ class BudgetTracker:
     def can_spend(self, amount_usd: float, loop_id: str = "") -> bool:
         """Check whether spending *amount_usd* would stay within limits.
 
-        Returns ``True`` if the spend is allowed, ``False`` otherwise.
-        Does **not** record the spend.
+        Always returns True — budget gating is disabled because we use a
+        Claude subscription (rate-limited by the provider, not by us).
+        Cost tracking continues for observability via wandb.
         """
-        with self._lock:
-            now = time.time()
-            hourly = self._sum_window(now, 3600) + amount_usd
-            daily = self._sum_window(now, 86400) + amount_usd
-            return hourly <= self.hourly_limit_usd and daily <= self.daily_limit_usd
+        return True
 
     def record_spend(
         self,
@@ -106,15 +103,8 @@ class BudgetTracker:
         with self._lock:
             now = time.time()
 
-            # Check hourly limit
-            hourly_total = self._sum_window(now, 3600) + amount_usd
-            if hourly_total > self.hourly_limit_usd:
-                raise BudgetExhaustedError("hourly", self.hourly_limit_usd, hourly_total)
-
-            # Check daily limit
-            daily_total = self._sum_window(now, 86400) + amount_usd
-            if daily_total > self.daily_limit_usd:
-                raise BudgetExhaustedError("daily", self.daily_limit_usd, daily_total)
+            # Budget enforcement disabled — using Claude subscription.
+            # Cost is tracked for observability only (wandb).
 
             record = SpendRecord(
                 timestamp=now,
