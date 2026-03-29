@@ -38,6 +38,7 @@ from src.orchestrator.budget_tracker import BudgetTracker
 from src.orchestrator.experiment_git import ExperimentGit
 from src.orchestrator.opus_client import OpusClient
 from src.rewards import CompositeReward
+from src.infra import wandb_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +248,6 @@ class MasterLoop:
         logger.info("All subsystems initialized")
 
         # Initialize wandb tracking
-        from src.infra import wandb_tracker
         wandb_tracker.init(
             project="tokagotchi",
             name=f"run-{time.strftime('%Y%m%d-%H%M')}",
@@ -653,7 +653,6 @@ class MasterLoop:
         )
 
         # Track in wandb
-        from src.infra import wandb_tracker
         wandb_tracker.log_budget(
             hourly_usd=hourly_usd,
             daily_usd=daily_usd,
