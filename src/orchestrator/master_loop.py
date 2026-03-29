@@ -405,6 +405,12 @@ class MasterLoop:
         )
 
         # Process failed trajectories: SDPO first (free), Opus fallback (costly)
+        n_success = sum(1 for t in trajectories if t.success)
+        n_failed = sum(1 for t in trajectories if not t.success)
+        logger.info(
+            "Trace collection: %d trajectories (%d success, %d failed)",
+            len(trajectories), n_success, n_failed,
+        )
         for traj in trajectories:
             if not traj.success:
                 # SDPO: self-distillation using Qwen's own re-evaluation
