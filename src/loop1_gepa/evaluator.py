@@ -530,6 +530,18 @@ async def evaluate_genome(
         code_quality,
     )
 
+    # Track in wandb
+    from src.infra import wandb_tracker
+    wandb_tracker.log_genome_eval(
+        genome_id=genome.genome_id,
+        generation=genome.generation,
+        success_rate=success_rate,
+        avg_steps=avg_steps,
+        tool_accuracy=tool_accuracy,
+        code_quality=code_quality,
+        mutation_type=genome.mutation_type,
+    )
+
     return result
 
 

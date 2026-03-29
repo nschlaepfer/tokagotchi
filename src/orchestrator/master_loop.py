@@ -246,6 +246,21 @@ class MasterLoop:
 
         logger.info("All subsystems initialized")
 
+        # Initialize wandb tracking
+        from src.infra import wandb_tracker
+        wandb_tracker.init(
+            project="tokagotchi",
+            name=f"run-{time.strftime('%Y%m%d-%H%M')}",
+            config={
+                "model": self.config.model.name,
+                "gpu": "RTX 5090 32GB",
+                "loop1_enabled": True,
+                "loop2_sdpo": True,
+                "loop3_overnight": True,
+            },
+            tags=["tokagotchi", self.config.model.name.split("/")[-1]],
+        )
+
     # ------------------------------------------------------------------
     # Loop 1: GEPA (continuous prompt evolution)
     # ------------------------------------------------------------------
@@ -405,6 +420,15 @@ class MasterLoop:
                                 "SDPO: %d contrastive pairs from trajectory %s",
                                 len(pairs),
                                 traj.trajectory_id[:12],
+                            )
+                            # Track in wandb
+                            avg_div = sum(p.weight for p in pairs) / len(pairs) if pairs else 0
+                            wandb_tracker.log_sdpo(
+                                trajectory_id=traj.trajectory_id,
+                                num_pairs=len(pairs),
+                                num_steps_checked=len(pairs),
+                                avg_divergence=avg_div,
+                                escalated_to_opus=False,
                             )
                     except Exception:
                         logger.exception("SDPO re-evaluation failed")
@@ -597,6 +621,9 @@ class MasterLoop:
             self.budget_tracker.get_summary() if self.budget_tracker else {}
         )
 
+        hourly_usd = budget_summary.get("hourly_usd", 0)
+        daily_usd = budget_summary.get("daily_usd", 0)
+
         logger.info(
             "=== MasterLoop Status (uptime %.0fs) ===\n"
             "  Loops: %s\n"
@@ -604,9 +631,23 @@ class MasterLoop:
             "  Metrics: %s",
             uptime,
             self._loop_status,
-            budget_summary.get("hourly_usd", 0),
-            budget_summary.get("daily_usd", 0),
+            hourly_usd,
+            daily_usd,
             {k: v for k, v in self._metrics.items() if k != "loop1"},
+        )
+
+        # Track in wandb
+        from src.infra import wandb_tracker
+        wandb_tracker.log_budget(
+            hourly_usd=hourly_usd,
+            daily_usd=daily_usd,
+            opus_calls=budget_summary.get("num_calls", 0),
+        )
+        wandb_tracker.log_pipeline_status(
+            uptime_seconds=uptime,
+            loop1_status=self._loop_status.get("loop1_gepa", "unknown"),
+            loop2_status=self._loop_status.get("loop2_distill", "unknown"),
+            loop3_status=self._loop_status.get("loop3_rl", "unknown"),
         )
 
     def get_status(self) -> dict[str, Any]:

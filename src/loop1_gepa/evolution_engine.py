@@ -13,6 +13,8 @@ import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from src.infra import wandb_tracker
 from typing import Any
 
 from src.arena.docker_manager import DockerManager
@@ -270,6 +272,18 @@ class GEPAEngine:
                     record.mutations_succeeded,
                     record.mutations_proposed,
                     record.best_scores.get("success_rate", 0.0),
+                )
+
+                # Track in wandb
+                wandb_tracker.log_iteration(
+                    iteration=iteration + 1,
+                    generation=self.generation,
+                    frontier_size=record.frontier_size,
+                    mutations_succeeded=record.mutations_succeeded,
+                    mutations_proposed=record.mutations_proposed,
+                    best_success=record.best_scores.get("success_rate", 0.0),
+                    best_tool_acc=record.best_scores.get("tool_accuracy", 0.0),
+                    duration_seconds=elapsed,
                 )
 
             except Exception:
