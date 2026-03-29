@@ -119,6 +119,16 @@ class GEPAEngine:
         # Rate limiting: track Opus calls per hour
         self._opus_call_timestamps: list[float] = []
 
+        # Mutation diversity: cycle through high-impact types
+        self._mutation_type_cycle = [
+            MutationOperator.ADD_EXAMPLE,
+            MutationOperator.MODIFY_TOOL_INSTRUCTIONS,
+            MutationOperator.STRENGTHEN_INSTRUCTION,
+            MutationOperator.ADD_ERROR_RECOVERY,
+            MutationOperator.ADD_COT_STEP,
+        ]
+        self._mutation_cycle_idx = 0
+
         # Paths
         self._population_path = self.data_dir / "population.json"
         self._frontier_path = self.data_dir / "frontier.json"
@@ -313,10 +323,22 @@ class GEPAEngine:
         # Rate limit: ensure we don't exceed experiments_per_hour
         await self._rate_limit()
 
+        # Assign forced mutation types to ensure diversity
+        forced_types: list[MutationOperator | None] = []
+        for _ in parents:
+            forced = self._mutation_type_cycle[
+                self._mutation_cycle_idx % len(self._mutation_type_cycle)
+            ]
+            forced_types.append(forced)
+            self._mutation_cycle_idx += 1
+
         # Run mutation proposals concurrently with a semaphore
         semaphore = asyncio.Semaphore(3)  # Max 3 concurrent Opus calls
 
-        async def _mutate_one(parent: PromptGenome) -> tuple[MutationOperator, PromptGenome] | None:
+        async def _mutate_one(
+            parent: PromptGenome,
+            required_type: MutationOperator | None = None,
+        ) -> tuple[MutationOperator, PromptGenome] | None:
             async with semaphore:
                 await self._rate_limit()
 
@@ -330,6 +352,7 @@ class GEPAEngine:
                         self.opus_client,
                         parent,
                         eval_result,
+                        required_type=required_type,
                     )
                     self._opus_call_timestamps.append(time.monotonic())
                     return mutation_type, mutated
@@ -342,7 +365,7 @@ class GEPAEngine:
                     return None
 
         results = await asyncio.gather(
-            *[_mutate_one(p) for p in parents],
+            *[_mutate_one(p, ft) for p, ft in zip(parents, forced_types)],
             return_exceptions=True,
         )
 

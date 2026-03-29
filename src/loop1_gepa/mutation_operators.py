@@ -76,9 +76,23 @@ _MUTATION_RESPONSE_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
+def _forced_type_instruction(required_type: MutationOperator | None) -> str:
+    """Return an instruction that forces a specific mutation type, or empty."""
+    if required_type is None:
+        return ""
+    return (
+        f"\n\n## MANDATORY MUTATION TYPE\n"
+        f"You MUST use mutation_type = \"{required_type.value}\". "
+        f"This is non-negotiable. Do NOT use any other mutation type. "
+        f"Diagnose the failures and apply a {required_type.value} mutation."
+    )
+
+
 def _build_mutation_prompt(
     genome: PromptGenome,
     eval_result: EvalResult,
+    *,
+    required_type: MutationOperator | None = None,
 ) -> str:
     """Construct the prompt sent to Opus for mutation proposal."""
 
@@ -208,7 +222,8 @@ unless rephrasing is genuinely the best fix. Consider:
 specify this EXACTLY.
 
 Return a JSON object with: mutation_type, diagnosis, rationale, system_prompt, \
-few_shot_examples, cot_scaffold, tool_instructions, error_recovery_hints."""
+few_shot_examples, cot_scaffold, tool_instructions, error_recovery_hints.
+{_forced_type_instruction(required_type)}"""
 
 
 _MUTATION_DESCRIPTIONS: dict[MutationOperator, str] = {
@@ -246,6 +261,7 @@ async def propose_mutation(
     opus_client: OpusClient,
     genome: PromptGenome,
     eval_result: EvalResult,
+    required_type: MutationOperator | None = None,
 ) -> tuple[MutationOperator, PromptGenome]:
     """Use Opus to diagnose failures and propose a targeted genome mutation.
 
@@ -260,6 +276,9 @@ async def propose_mutation(
         The current prompt genome to mutate.
     eval_result:
         Evaluation results containing trajectories and failure patterns.
+    required_type:
+        If set, forces Opus to use this specific mutation type instead
+        of choosing freely. Used to enforce mutation diversity.
 
     Returns
     -------
@@ -267,7 +286,7 @@ async def propose_mutation(
         The chosen mutation type and the new mutated genome.
         On failure, returns (REPHRASE_SECTION, original_genome).
     """
-    prompt = _build_mutation_prompt(genome, eval_result)
+    prompt = _build_mutation_prompt(genome, eval_result, required_type=required_type)
 
     response = await opus_client.query(
         prompt,
