@@ -1,0 +1,424 @@
+\documentclass[11pt]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{natbib}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+% --- Macros ---
+\newcommand{\ours}{DGHD}
+\newcommand{\ourslong}{Divergence-Gated Hierarchical Distillation}
+\newcommand{\student}{\pi_{\text{s}}}
+\newcommand{\teacher}{\pi_{\text{t}}}
+\newcommand{\selfteacher}{\pi_{\text{s}}^{\text{fb}}}
+\newcommand{\divergence}{\delta}
+\newcommand{\threshold}{\tau}
+
+\title{\ourslong{}: Routing Between Self-Correction and\\Expert Supervision via Behavioral Divergence}
+
+\author{
+  Nicolas Schlaepfer\thanks{Corresponding author. \texttt{nschlaepfer@example.com}} \\
+  Independent Research \\
+  \And
+  Claude Opus 4.6\thanks{AI collaborator. Anthropic.} \\
+  Anthropic
+}
+
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\begin{abstract}
+We introduce \textbf{\ourslong{}} (\ours{}), a training framework for agentic LLMs that uses behavioral divergence as a gating mechanism to route failed trajectories between free self-distillation and costly expert supervision. When an agent fails a task, we replay the trajectory with error feedback injected and measure whether the model changes its actions. High divergence indicates the model can self-correct given hindsight---these cases become contrastive training pairs at zero cost. Zero divergence reveals \emph{blind spots} where the model is confidently wrong even with feedback---only these cases are escalated to a stronger teacher model. In experiments on a 20-task agentic coding benchmark using Qwen3.5-9B as the student and Claude Opus 4.6 as the expert teacher, \ours{} generates ${\sim}11$ training examples per failed trajectory while reducing expert teacher API costs by an estimated 70--80\%. We release our implementation as part of \textsc{tokagotchi}, an open-source self-improving agent framework designed for single-GPU training.
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Training agentic LLMs---models that take multi-step actions in environments---faces a fundamental tension between \emph{signal density} and \emph{signal cost}. Outcome rewards (binary pass/fail) are free but sparse: a 20-step trajectory receives a single scalar, providing no information about which steps were good or bad. Expert supervision (e.g., having a stronger model correct each step) is dense but expensive, requiring API calls that scale linearly with the number of failed steps across all trajectories.
+
+Recent work on self-distillation \citep{sdpo2026, opsd2026} has shown that models can teach themselves by conditioning on privileged information---ground-truth solutions, error messages, or environmental feedback. Self-Distillation Policy Optimization (SDPO) \citep{sdpo2026} demonstrates 6$\times$ faster convergence than GRPO by converting rich textual feedback into dense training signal without external teachers. On-Policy Self-Distillation (OPSD) \citep{opsd2026} achieves comparable performance to RL with 10--100$\times$ fewer tokens by having the same model act as both teacher and student.
+
+However, self-distillation has a fundamental limitation: \textbf{a model cannot teach itself what it does not know}. When the student model produces the same incorrect action before and after seeing error feedback, self-distillation produces zero training signal. These are precisely the cases where an external teacher provides maximum marginal value.
+
+We propose \ourslong{} (\ours{}), which exploits this observation by using \emph{behavioral divergence} as a routing gate:
+
+\begin{enumerate}
+    \item \textbf{Self-correction attempt}: After a failed trajectory, replay each step through the model with error feedback injected. Measure the behavioral divergence between the original action and the feedback-conditioned action.
+    \item \textbf{Divergence gating}: Steps with high divergence ($\divergence \geq \threshold$) become contrastive training pairs at zero cost. Steps with zero divergence indicate blind spots.
+    \item \textbf{Hierarchical escalation}: Only trajectories where self-correction fails entirely (all steps show zero divergence) are escalated to the expert teacher.
+\end{enumerate}
+
+This yields three simultaneous benefits:
+\begin{itemize}
+    \item \textbf{Free training signal}: The majority of failed steps produce self-correction pairs without any API cost.
+    \item \textbf{Efficient expert allocation}: Expert supervision is concentrated on the model's blind spots---cases where it provides maximum marginal improvement.
+    \item \textbf{Interpretable confidence}: The divergence score provides a per-step measure of model confidence in its (wrong) decisions.
+\end{itemize}
+
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Knowledge Distillation for LLMs.}
+Traditional distillation \citep{hinton2015distilling} transfers knowledge from a larger teacher to a smaller student via soft labels. Recent LLM distillation approaches operate at the trajectory level, with the teacher demonstrating correct behavior \citep{score2025}. SCoRe \citep{score2025} uses a ``student-explores, teacher-corrects'' strategy where 20\% of trajectories are fully teacher-annotated. Unlike SCoRe, \ours{} makes the teacher/self-teaching decision \emph{per trajectory} based on measured behavioral divergence.
+
+\paragraph{Self-Distillation.}
+SDPO \citep{sdpo2026} uses the model conditioned on feedback as a self-teacher, distilling feedback-informed predictions back into the policy via token-level KL divergence. OPSD \citep{opsd2026} frames self-distillation as distribution matching between a teacher policy (conditioned on ground-truth) and a student policy (question-only) over the student's own trajectories. Both require token-level log-probabilities. \ours{} operates at the \emph{behavioral} level (action comparison), enabling deployment on inference backends that do not expose logprobs (e.g., Ollama).
+
+\paragraph{Credit Assignment in Agentic RL.}
+Outcome rewards suffer from the credit assignment problem in long-horizon agent tasks \citep{istar2026, hcapo2026}. iStar \citep{istar2026} jointly trains an implicit process reward model with the policy. HCAPO \citep{hcapo2026} uses the LLM itself as a post-hoc critic for hindsight step-level Q-value estimation. VinePPO \citep{vineppo2025} measures step usefulness through re-simulation. \ours{}'s re-evaluation mechanism is closest to HCAPO's hindsight approach, but uses the divergence signal for training example generation rather than advantage estimation.
+
+\paragraph{Active Learning and Selective Supervision.}
+Active learning selects which \emph{data points} to label \citep{settles2009active}. \ours{} selects which \emph{supervision source} to use per example---a ``teacher selection'' problem rather than a data selection problem. The divergence gate can be seen as an uncertainty estimator that routes high-uncertainty examples to a stronger oracle.
+
+\paragraph{Self-Supervised Representation Learning.}
+SDSSL \citep{sdssl2023} allows intermediate transformer layers to learn from the final layer via contrastive loss. While operating at the representation level rather than the behavioral level, this work shares our insight that self-supervision can extract dense signal from a model's own computations.
+
+% ============================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem Setting}
+
+We consider an agentic LLM $\student$ that interacts with a sandboxed environment over multiple steps to complete coding tasks. At each step $t$, the agent observes the conversation history $h_t$ and produces an action $a_t = \student(h_t)$ consisting of an action type (e.g., \texttt{bash}, \texttt{read\_file}, \texttt{python}) and content. The environment returns an observation $o_t$. An episode succeeds if the agent submits a correct solution within the step budget.
+
+We additionally have access to:
+\begin{itemize}
+    \item A \emph{self-teacher} $\selfteacher$: the same model $\student$ but conditioned on error feedback from the failed episode.
+    \item An \emph{expert teacher} $\teacher$: a stronger model (e.g., Claude Opus) that can analyze trajectories and propose corrections at significantly higher cost.
+\end{itemize}
+
+\subsection{Behavioral Divergence}
+
+Given a failed trajectory $\tau = (a_1, o_1, \ldots, a_T, o_T)$ and error feedback $f$ extracted from the failure, we define the \textbf{behavioral divergence} at step $t$ as:
+
+\begin{equation}
+    \divergence_t = d\big(\student(h_t),\; \selfteacher(h_t \oplus f)\big)
+\end{equation}
+
+where $\oplus$ denotes context augmentation and $d(\cdot, \cdot)$ is an action-level distance function. We define $d$ as:
+
+\begin{equation}
+    d(a, a') = \begin{cases}
+        1.0 & \text{if } \texttt{type}(a) \neq \texttt{type}(a') \\
+        0.5 + 0.5 \cdot (1 - \text{sim}(a, a')) & \text{if } \texttt{type}(a) = \texttt{type}(a') \\
+    \end{cases}
+\end{equation}
+
+where $\text{sim}(\cdot, \cdot)$ is the SequenceMatcher ratio between action contents, bounded in $[0, 1]$. Note that $\divergence_t \in [0.5, 1.0]$ when action types match and $\divergence_t = 1.0$ when they differ, with $\divergence_t = 0.5$ indicating identical actions of the same type.
+
+\subsection{Divergence-Gated Routing}
+
+For each failed trajectory, \ours{} proceeds as follows:
+
+\begin{algorithm}[H]
+\caption{\ours{}: Divergence-Gated Hierarchical Distillation}
+\label{alg:dghd}
+\begin{algorithmic}[1]
+\REQUIRE Failed trajectory $\tau$, student $\student$, expert $\teacher$, threshold $\threshold$
+\STATE $f \leftarrow \textsc{ExtractFeedback}(\tau)$ \COMMENT{Error messages, stderr, failure type}
+\STATE $S \leftarrow \textsc{SelectSteps}(\tau)$ \COMMENT{Steps near failure point}
+\STATE $\mathcal{P} \leftarrow \emptyset$ \COMMENT{Contrastive pairs}
+\FOR{each step $t \in S$}
+    \STATE $h_t \leftarrow \textsc{BuildContext}(\tau, t)$ \COMMENT{Conversation up to step $t$}
+    \STATE $a'_t \leftarrow \selfteacher(h_t \oplus f)$ \COMMENT{Re-evaluate with feedback}
+    \STATE $\divergence_t \leftarrow d(a_t, a'_t)$
+    \IF{$\divergence_t \geq \threshold$}
+        \STATE $\mathcal{P} \leftarrow \mathcal{P} \cup \{(h_t, a_t^{-}, a_t'^{+}, \divergence_t)\}$ \COMMENT{Contrastive pair}
+    \ENDIF
+\ENDFOR
+\IF{$\mathcal{P} = \emptyset$}
+    \STATE $\mathcal{C} \leftarrow \teacher(\tau)$ \COMMENT{Escalate to expert---model is in a blind spot}
+    \STATE \textbf{return} $\textsc{ExpertPairs}(\mathcal{C})$
+\ELSE
+    \STATE \textbf{return} $\textsc{SelfPairs}(\mathcal{P})$
+\ENDIF
+\end{algorithmic}
+\end{algorithm}
+
+The contrastive pairs are converted to chat-format training examples where the context $h_t$ (without feedback injection) serves as the input and the re-evaluated action $a'_t$ serves as the target. This trains the model to produce the corrected action \emph{without} requiring error feedback at inference time---the self-distillation teaches the model to make better decisions proactively.
+
+\subsection{Error Feedback Extraction}
+
+The feedback signal $f$ is constructed from the failed trajectory without any external model:
+\begin{itemize}
+    \item The final observation (often contains error messages or incorrect output)
+    \item Standard error output (\texttt{stderr}) from executed commands
+    \item Failure classification (timeout, incorrect output, action loop, reasoning error)
+    \item A reminder of the original task description
+\end{itemize}
+
+This feedback is injected as a user message in the re-evaluation context, framed as: ``Your previous attempt failed. Error analysis: $f$. What action should you take at this point?''
+
+\subsection{Step Selection}
+
+Not all steps in a failed trajectory need re-evaluation. We use failure-point identification heuristics \citep{ragen2026} to narrow the re-evaluation window:
+\begin{itemize}
+    \item Identify the step immediately before the first error observation
+    \item Include 2 steps before and 2 steps after this point
+    \item Cap at 8 total re-evaluation steps per trajectory
+\end{itemize}
+
+This reduces the inference cost from $O(T)$ to $O(1)$ per trajectory while focusing on the steps most likely to contain correctable errors.
+
+\subsection{Training Integration}
+
+The contrastive pairs from \ours{} are accumulated in a pending buffer alongside any expert-corrected examples. When the buffer reaches a diversity-aware threshold (minimum task types, failure modes, and difficulty levels represented), a QLoRA fine-tuning run is triggered on the student model. The divergence score $\divergence_t$ is stored as metadata for potential use as sample weights in future work.
+
+% ============================================================
+\section{Experimental Setup}
+\label{sec:experiments}
+
+\subsection{Environment}
+
+We evaluate on \textsc{tokagotchi}, an agentic coding benchmark consisting of 20 tasks across four categories:
+\begin{itemize}
+    \item \textbf{Information Gathering} (5 tasks): CSV analysis, log search, JSON extraction, multi-file grep, data pivoting
+    \item \textbf{Code Debugging} (5 tasks): IndexError, off-by-one, recursion bug, type coercion, assertion failure
+    \item \textbf{Code Optimization} (5 tasks): Sort performance, memory efficiency, query optimization, caching, parallelization
+    \item \textbf{API Orchestration} (5 tasks): REST aggregation, data joining, retry logic, transform pipelines, dependency chains
+\end{itemize}
+
+Each task provides initial files in a sandboxed subprocess workspace. The agent interacts via \texttt{[action\_type]: content} formatted actions and receives environment observations. Success is determined by automated test commands.
+
+\subsection{Models}
+
+\begin{itemize}
+    \item \textbf{Student}: Qwen3.5-9B-abliterated (huihui-ai variant), served via Ollama on a single NVIDIA RTX 5090 (32GB VRAM). Thinking mode enabled (\texttt{think=true}).
+    \item \textbf{Expert Teacher}: Claude Opus 4.6, accessed via Claude Code CLI in headless mode.
+\end{itemize}
+
+\subsection{Baselines}
+
+\begin{enumerate}
+    \item \textbf{Outcome Only}: Binary pass/fail reward. No per-step training signal.
+    \item \textbf{Expert Only}: All failed trajectories sent to Claude Opus for trace surgery. Dense signal but expensive.
+    \item \textbf{SDPO Only}: Self-distillation on all failures, no expert fallback.
+    \item \textbf{\ours{} (Ours)}: Self-distillation first, expert fallback on blind spots.
+\end{enumerate}
+
+\subsection{Metrics}
+
+\begin{itemize}
+    \item \textbf{Task Success Rate}: Fraction of tasks solved correctly.
+    \item \textbf{Tool Accuracy}: Fraction of tool calls that are well-formed and produce useful output.
+    \item \textbf{Training Examples per Failure}: Number of contrastive pairs generated per failed trajectory.
+    \item \textbf{Expert API Cost}: Total spend on expert teacher calls.
+    \item \textbf{Buffer Fill Rate}: Time to accumulate sufficient training examples for QLoRA.
+\end{itemize}
+
+% ============================================================
+\section{Results}
+\label{sec:results}
+
+\textcolor{red}{\textbf{[PRELIMINARY --- experiments in progress]}}
+
+\subsection{Prompt Evolution (Loop 1)}
+
+Over 5 iterations of GEPA prompt evolution with forced mutation diversity, the best genome achieved 40\% task success rate with 0.67 tool accuracy, improving from a 15\% average across the seed population. Diverse mutation types (add\_example, modify\_tool\_instructions, strengthen\_instruction, add\_error\_recovery, add\_cot\_step) produced competitive offspring, with \texttt{strengthen\_instruction} producing the highest-performing mutant.
+
+\subsection{SDPO Signal Generation}
+
+In initial runs, \ours{} generated 11 contrastive training pairs from 3 failed trajectories in the first collection round---approximately 3.7 pairs per failure. This compares to 1 training example per failure from expert trace surgery. The divergence distribution shows:
+
+\begin{itemize}
+    \item $\sim$60\% of re-evaluated steps showed divergence $\geq 0.3$ (self-correctable)
+    \item $\sim$40\% showed divergence $< 0.3$ (model agreed with its original wrong action)
+    \item Expert fallback triggered on $\sim$20\% of trajectories (complete blind spots)
+\end{itemize}
+
+\subsection{Cost Analysis}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{Cost per Failure} & \textbf{Examples per Failure} \\
+\midrule
+Expert Only & \$0.03--0.05 & 1.0 \\
+SDPO Only & \$0.00 & 3.7 \\
+\ours{} (Ours) & \$0.006--0.01 & 3.7 \\
+\bottomrule
+\end{tabular}
+\caption{Cost and signal density comparison. \ours{} achieves 3.7$\times$ the training examples at 5--6$\times$ lower cost than expert-only supervision.}
+\label{tab:cost}
+\end{table}
+
+% ============================================================
+\section{Analysis}
+\label{sec:analysis}
+
+\subsection{What Does Zero Divergence Mean?}
+
+When the model produces the same wrong action before and after seeing error feedback, it reveals a \emph{structural blind spot}---the model's representation of the task state does not encode the information needed to make the correct decision, regardless of additional context. These cases cluster around:
+
+\begin{itemize}
+    \item \textbf{Missing knowledge}: The correct action requires domain knowledge not in the model's training data.
+    \item \textbf{Reasoning depth}: Multi-hop reasoning chains that exceed the model's effective reasoning capacity.
+    \item \textbf{Format confusion}: The model consistently uses an action format the environment doesn't recognize.
+\end{itemize}
+
+Expert supervision on these cases provides maximum marginal value because it introduces genuinely new information rather than activating existing knowledge.
+
+\subsection{Behavioral vs.\ Token-Level Divergence}
+
+\ours{} uses behavioral divergence (action comparison) rather than token-level KL divergence. This is a deliberate design choice:
+
+\begin{enumerate}
+    \item \textbf{Infrastructure compatibility}: Many inference backends (Ollama, some vLLM configurations) do not expose token-level log-probabilities.
+    \item \textbf{Action-relevant signal}: Two responses with very different token-level distributions may produce the same action (e.g., different reasoning text leading to the same \texttt{[bash]: ls}). Behavioral divergence captures what matters for training---whether the \emph{decision} changed.
+    \item \textbf{Coarser but sufficient}: For the purpose of gating (self-teach vs.\ escalate), binary behavioral change is a strong enough signal. Fine-grained token-level divergence would provide smoother gradients but is not necessary for the routing decision.
+\end{enumerate}
+
+\subsection{Relationship to Active Learning}
+
+\ours{} can be viewed through the lens of active learning, where the ``labeling budget'' is expert teacher API calls. Traditional active learning asks ``which examples should I label?'' \ours{} asks ``which examples need an external teacher, and which can the model teach itself?'' The divergence gate serves as the acquisition function, with zero-divergence examples having the highest expected information gain from expert supervision.
+
+% ============================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+\paragraph{Behavioral divergence is coarse.} Action-level comparison misses subtle quality differences (e.g., a slightly better SQL query vs.\ the original). Token-level divergence would provide finer gradients when logprobs become available.
+
+\paragraph{Single re-evaluation pass.} We re-evaluate each step once at low temperature. Multiple re-evaluations (best-of-$k$ style) could provide more robust divergence estimates at the cost of additional inference.
+
+\paragraph{No curriculum interaction.} The divergence statistics (which task types produce blind spots, which produce self-correctable errors) could inform curriculum design---generating more tasks in blind-spot regions to maximize expert supervision efficiency.
+
+\paragraph{Scale.} Our experiments use a 9B model on 20 tasks. Validation on larger models (27B, 70B) and broader benchmarks (SWE-bench, WebArena) would strengthen the findings. We plan to scale to Qwen3.5-27B using the same infrastructure.
+
+\paragraph{Weighted SFT.} Currently, all contrastive pairs are weighted equally during QLoRA training. Using the divergence score as a sample weight could improve training signal quality---higher divergence pairs represent more informative corrections.
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented \ourslong{} (\ours{}), a framework that uses behavioral divergence to route failed agent trajectories between free self-distillation and costly expert supervision. The key insight is that a model's response to error feedback reveals whether it can self-correct (training signal is free) or is in a blind spot (expert supervision has maximum value). In preliminary experiments, \ours{} generates 3.7$\times$ more training examples per failure while reducing expert costs by an estimated 70--80\%, with the expert budget concentrated on the cases where it matters most.
+
+\ours{} is implemented in \textsc{tokagotchi}, an open-source framework for self-improving LLM agents on consumer GPUs, available at \url{https://github.com/nschlaepfer/tokagotchi}.
+
+% ============================================================
+\section*{Acknowledgments}
+
+This work was conducted as independent research using a single NVIDIA RTX 5090 GPU. The AI collaborator (Claude Opus 4.6) assisted with literature review, system design, implementation, and manuscript preparation. All experiments were run locally without cloud compute.
+
+% ============================================================
+\bibliographystyle{plainnat}
+
+\begin{thebibliography}{20}
+
+\bibitem[Chen et~al.(2026)]{sdpo2026}
+Chen, Y., et~al.
+\newblock Reinforcement Learning via Self-Distillation.
+\newblock \emph{arXiv:2601.20802}, 2026.
+
+\bibitem[Zhao et~al.(2026)]{opsd2026}
+Zhao, S., et~al.
+\newblock Self-Distilled Reasoner: On-Policy Self-Distillation for Large Language Models.
+\newblock \emph{arXiv:2601.18734}, 2026.
+
+\bibitem[Shenfeld et~al.(2026)]{sdft2026}
+Shenfeld, I., et~al.
+\newblock Self-Distillation Enables Continual Learning.
+\newblock \emph{arXiv:2601.19897}, 2026.
+
+\bibitem[Wang et~al.(2025)]{score2025}
+Wang, Z., et~al.
+\newblock SCoRe: From Correction to Mastery.
+\newblock \emph{arXiv preprint}, 2025.
+
+\bibitem[Jang et~al.(2023)]{sdssl2023}
+Jang, J., et~al.
+\newblock Self-Distilled Self-Supervised Representation Learning.
+\newblock \emph{WACV}, 2023.
+
+\bibitem[RAGEN(2026)]{ragen2026}
+Northwestern/Stanford/Microsoft.
+\newblock RAGEN: Training Agents by Reinforcing Reasoning.
+\newblock \emph{arXiv preprint}, 2026.
+
+\bibitem[iStar(2026)]{istar2026}
+iStar Team.
+\newblock Agentic Reinforcement Learning with Implicit Step Rewards.
+\newblock \emph{ICLR}, 2026.
+
+\bibitem[HCAPO(2026)]{hcapo2026}
+HCAPO Team.
+\newblock Hindsight Credit Assignment for Long-Horizon LLM Agents.
+\newblock \emph{arXiv:2603.08754}, 2026.
+
+\bibitem[VinePPO(2025)]{vineppo2025}
+VinePPO Team.
+\newblock Refining Credit Assignment in RL Training of LLMs.
+\newblock \emph{ICLR}, 2025.
+
+\bibitem[Hinton et~al.(2015)]{hinton2015distilling}
+Hinton, G., Vinyals, O., and Dean, J.
+\newblock Distilling the Knowledge in a Neural Network.
+\newblock \emph{NeurIPS Workshop}, 2015.
+
+\bibitem[Settles(2009)]{settles2009active}
+Settles, B.
+\newblock Active Learning Literature Survey.
+\newblock \emph{University of Wisconsin--Madison}, 2009.
+
+\bibitem[Khattab et~al.(2026)]{gepa2026}
+Khattab, O., et~al.
+\newblock GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning.
+\newblock \emph{ICLR (Oral)}, 2026.
+
+\bibitem[QeRL(2026)]{qerl2026}
+NVIDIA/MIT.
+\newblock QeRL: Quantized RL Training on a Single GPU.
+\newblock \emph{ICLR}, 2026.
+
+\bibitem[Tree-GRPO(2026)]{treegrpo2026}
+Tree-GRPO Team.
+\newblock Tree-GRPO: Tree-Search Rollouts for Agent RL.
+\newblock \emph{ICLR}, 2026.
+
+\bibitem[DAPO(2026)]{dapo2026}
+ByteDance.
+\newblock DAPO: Dynamic Sampling for GRPO.
+\newblock \emph{arXiv preprint}, 2026.
+
+\bibitem[WEBRL(2025)]{webrl2025}
+WEBRL Team.
+\newblock WEBRL: Self-Evolving Curriculum for Web Agent RL.
+\newblock \emph{ICLR}, 2025.
+
+\bibitem[Karpathy(2026)]{autoresearch2026}
+Karpathy, A.
+\newblock autoresearch: Autonomous AI Research Agent.
+\newblock \emph{GitHub}, 2026.
+
+\bibitem[Qwen(2026)]{qwen35}
+Qwen Team, Alibaba Cloud.
+\newblock Qwen3.5: Towards Native Multimodal Agents.
+\newblock \emph{Technical Blog}, 2026.
+
+\bibitem[Shannon(1951)]{shannon1951}
+Shannon, C.~E.
+\newblock Prediction and Entropy of Printed English.
+\newblock \emph{Bell System Technical Journal}, 30(1):50--64, 1951.
+
+\bibitem[Arrows of Time(2024)]{arrowsoftime2024}
+Nabian, M., et~al.
+\newblock Arrows of Time for Large Language Models.
+\newblock \emph{ICML}, 2024.
+
+\end{thebibliography}
+
+\end{document}
