@@ -305,16 +305,26 @@ async def propose_mutation(
 
     data = response.raw_json
 
-    # Parse mutation type
-    mutation_type_str = data.get("mutation_type", MutationOperator.REPHRASE_SECTION.value)
-    try:
-        mutation_type = MutationOperator(mutation_type_str)
-    except ValueError:
-        logger.warning(
-            "Unknown mutation type '%s', falling back to REPHRASE_SECTION",
-            mutation_type_str,
-        )
-        mutation_type = MutationOperator.REPHRASE_SECTION
+    # Parse mutation type — enforce required_type if set
+    if required_type is not None:
+        mutation_type = required_type
+        opus_choice = data.get("mutation_type", "")
+        if opus_choice != required_type.value:
+            logger.info(
+                "Overriding Opus choice '%s' with forced type '%s'",
+                opus_choice,
+                required_type.value,
+            )
+    else:
+        mutation_type_str = data.get("mutation_type", MutationOperator.REPHRASE_SECTION.value)
+        try:
+            mutation_type = MutationOperator(mutation_type_str)
+        except ValueError:
+            logger.warning(
+                "Unknown mutation type '%s', falling back to REPHRASE_SECTION",
+                mutation_type_str,
+            )
+            mutation_type = MutationOperator.REPHRASE_SECTION
 
     logger.info(
         "Opus proposed mutation %s for genome %s: %s",

@@ -5,8 +5,8 @@ model:
   ollama_host: "localhost"
 
 opus:
-  daily_budget_usd: 50.0
-  hourly_budget_usd: 10.0
+  daily_budget_usd: 9999.0
+  hourly_budget_usd: 9999.0
   session_dir: "./data/opus_sessions"
   model: "claude-opus-4-6"
   default_max_turns: 10
