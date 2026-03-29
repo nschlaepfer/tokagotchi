@@ -9,6 +9,7 @@ from src.loop2_distill.trace_surgeon import TraceSurgeon
 from src.loop2_distill.pending_buffer import PendingBuffer
 from src.loop2_distill.sft_launcher import SFTLauncher
 from src.loop2_distill.mentor_session import MentorSession
+from src.loop2_distill.sdpo_reevaluator import SDPOReevaluator
 
 __all__ = [
     "TraceCollector",
@@ -16,4 +17,5 @@ __all__ = [
     "PendingBuffer",
     "SFTLauncher",
     "MentorSession",
+    "SDPOReevaluator",
 ]

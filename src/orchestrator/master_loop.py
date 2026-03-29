@@ -31,6 +31,7 @@ from src.loop2_distill import (
     TraceCollector,
     TraceSurgeon,
 )
+from src.loop2_distill.sdpo_reevaluator import SDPOReevaluator
 from src.loop3_rl import RLRunner
 from src.models import EvalResult, PromptGenome, TaskSpec
 from src.orchestrator.budget_tracker import BudgetTracker
@@ -80,6 +81,7 @@ class MasterLoop:
         self._gepa_engine: GEPAEngine | None = None
         self._trace_collector: TraceCollector | None = None
         self._trace_surgeon: TraceSurgeon | None = None
+        self._sdpo_reevaluator: SDPOReevaluator | None = None
         self._pending_buffer: PendingBuffer | None = None
         self._sft_launcher: SFTLauncher | None = None
         self._rl_runner: RLRunner | None = None
@@ -212,6 +214,7 @@ class MasterLoop:
         # Loop 2 — Distillation
         self._trace_collector = TraceCollector()
         self._trace_surgeon = TraceSurgeon()
+        self._sdpo_reevaluator = SDPOReevaluator()
         self._pending_buffer = PendingBuffer(
             config=cfg.loop2,
             persist_path=data_dir / "pending.jsonl",
@@ -379,15 +382,57 @@ class MasterLoop:
             genome=self._best_genome,
         )
 
-        # Run trace surgery on failures
+        # Process failed trajectories: SDPO first (free), Opus fallback (costly)
         for traj in trajectories:
             if not traj.success:
-                analysis = await self.opus_client.correct_trace(traj)
-                if analysis.corrected_steps:
-                    self._pending_buffer.add(
-                        trajectory=traj,
-                        analysis=analysis,
-                    )
+                # SDPO: self-distillation using Qwen's own re-evaluation
+                pairs: list = []
+                if self._sdpo_reevaluator is not None and self._best_genome is not None:
+                    try:
+                        pairs = await self._sdpo_reevaluator.reevaluate(
+                            traj, self.vllm_server, self._best_genome,
+                        )
+                        if pairs:
+                            examples = self._sdpo_reevaluator.generate_training_examples(
+                                pairs, traj,
+                            )
+                            for ex in examples:
+                                self._pending_buffer.add(
+                                    example=ex["example"],
+                                    metadata=ex["metadata"],
+                                )
+                            logger.info(
+                                "SDPO: %d contrastive pairs from trajectory %s",
+                                len(pairs),
+                                traj.trajectory_id[:12],
+                            )
+                    except Exception:
+                        logger.exception("SDPO re-evaluation failed")
+
+                # Opus fallback: only if SDPO produced nothing
+                if not pairs:
+                    try:
+                        analysis = await self.opus_client.correct_trace(traj)
+                        if analysis and analysis.corrected_steps:
+                            ex = self._trace_surgeon.generate_training_example(
+                                traj, analysis,
+                            )
+                            if ex:
+                                task_type = (
+                                    traj.task.task_type.value
+                                    if traj.task
+                                    else "unknown"
+                                )
+                                self._pending_buffer.add(
+                                    example=ex,
+                                    metadata={
+                                        "task_type": task_type,
+                                        "failure_mode": "opus_corrected",
+                                        "source": "opus",
+                                    },
+                                )
+                    except Exception:
+                        logger.exception("Opus trace surgery failed")
 
     # ------------------------------------------------------------------
     # Loop 3: Overnight RL
