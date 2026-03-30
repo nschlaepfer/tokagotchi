@@ -54,11 +54,11 @@ class SFTLauncher:
         config: Loop2Config,
         base_model_path: str,
     ) -> str:
-        """Run QLoRA SFT on the provided training examples.
+        """Run LoRA SFT on the provided training examples via Unsloth.
 
-        Saves training data to a temporary JSONL file, configures PEFT
-        LoRA, and runs supervised fine-tuning. The full 32GB VRAM budget
-        is assumed available during training.
+        Uses Unsloth's FastModel which handles Qwen 3.5's Gated Delta
+        Networks natively on Windows without requiring triton/causal-conv1d.
+        Loads in 4-bit (~8GB VRAM) leaving room for training.
 
         Parameters
         ----------
@@ -74,58 +74,50 @@ class SFTLauncher:
         str
             Path to the saved LoRA adapter directory.
         """
-        # Lazy imports to avoid loading torch at module level
+        # Lazy imports
         import torch
         from datasets import Dataset
-        from peft import LoraConfig, TaskType as PeftTaskType, get_peft_model
-        from transformers import (
-            AutoModelForCausalLM,
-            AutoTokenizer,
-            BitsAndBytesConfig,
-            TrainingArguments,
-        )
+        from unsloth import FastModel
         from trl import SFTTrainer, SFTConfig
 
         logger.info(
-            "Launching SFT: %d examples, base_model=%s, lora_rank=%d",
+            "Launching SFT (Unsloth): %d examples, base_model=%s, lora_rank=%d",
             len(training_data),
             base_model_path,
             config.lora.rank,
         )
 
-        # 1. Save training data to a temporary JSONL file
+        # 1. Save training data
         data_path = self._save_training_data(training_data)
         logger.info("Training data saved to %s", data_path)
 
         # 2. Load dataset
         dataset = self._load_dataset(data_path)
 
-        # 3. Load tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(
-            base_model_path,
-            trust_remote_code=True,
+        # 3. Load model via Unsloth FastModel (handles Qwen 3.5 natively)
+        logger.info("Loading model via Unsloth FastModel...")
+        model, processor = FastModel.from_pretrained(
+            model_name=base_model_path,
+            max_seq_length=2048,
+            load_in_4bit=True,
+        )
+
+        # Extract text tokenizer from processor (Qwen 3.5 is multimodal)
+        tokenizer = (
+            processor.tokenizer if hasattr(processor, "tokenizer") else processor
         )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # BF16 loading — bitsandbytes 4-bit segfaults on Qwen 3.5's
-        # Gated Delta Network layers with current driver/library combo.
-        # BF16 9B model uses ~13GB, leaves ~19GB for LoRA + optimizer.
-        model = AutoModelForCausalLM.from_pretrained(
-            base_model_path,
-            dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-
-        # 4. Configure PEFT LoRA
-        lora_config = LoraConfig(
-            task_type=PeftTaskType.CAUSAL_LM,
+        # 4. Apply LoRA via Unsloth (uses its own optimized PEFT)
+        logger.info("Applying LoRA adapters...")
+        # Unsloth recommends dropout=0 for fast patching
+        model = FastModel.get_peft_model(
+            model,
             r=config.lora.rank,
             lora_alpha=config.lora.alpha,
             target_modules=config.lora.target_modules,
-            lora_dropout=config.lora.dropout,
-            bias="none",
+            lora_dropout=0.0,
         )
 
         # 5. Configure training
@@ -136,54 +128,49 @@ class SFTLauncher:
         training_args = SFTConfig(
             output_dir=adapter_output,
             num_train_epochs=1,
-            max_steps=config.max_steps,
-            per_device_train_batch_size=config.batch_size,
+            max_steps=min(config.max_steps, len(training_data) * 3),
+            per_device_train_batch_size=1,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             learning_rate=config.learning_rate,
             bf16=config.bf16,
             fp16=not config.bf16,
             gradient_checkpointing=config.gradient_checkpointing,
-            logging_steps=10,
-            save_strategy="epoch",
-            save_total_limit=2,
+            logging_steps=1,
+            save_strategy="no",
             remove_unused_columns=False,
             report_to="none",
+            max_seq_length=2048,
             gradient_checkpointing_kwargs={"use_reentrant": False}
             if config.gradient_checkpointing
             else None,
         )
 
-        # 6. Create trainer and run
-        def _formatting_func(example: dict[str, Any]) -> str:
-            """Format a single chat conversation into a string for SFT.
+        # 6. Formatting function for chat data
+        #    Unsloth's SFTTrainer expects a list of strings (batched mode)
+        def _formatting_func(examples: dict[str, Any]) -> list[str]:
+            """Format chat conversations into strings for SFT."""
+            texts = []
+            for messages in examples["messages"]:
+                parts = []
+                for msg in messages:
+                    if isinstance(msg, str):
+                        parts.append(msg)
+                        continue
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    parts.append(f"<|{role}|>\n{content}")
+                parts.append("<|end|>")
+                texts.append("\n".join(parts))
+            return texts
 
-            TRL 0.29+ calls this with batched=False, so example is a
-            single row: {"messages": [{"role": ..., "content": ...}, ...]}.
-            """
-            messages = example["messages"]
-            parts = []
-            for msg in messages:
-                if isinstance(msg, str):
-                    parts.append(msg)
-                    continue
-                role = msg.get("role", "user")
-                content = msg.get("content", "")
-                if role == "system":
-                    parts.append(f"<|system|>\n{content}")
-                elif role == "user":
-                    parts.append(f"<|user|>\n{content}")
-                elif role == "assistant":
-                    parts.append(f"<|assistant|>\n{content}")
-            parts.append("<|end|>")
-            return "\n".join(parts)
-
+        # 7. Create trainer and run
         try:
             logger.info("Creating SFTTrainer...")
             trainer = SFTTrainer(
                 model=model,
+                tokenizer=tokenizer,
                 args=training_args,
                 train_dataset=dataset,
-                peft_config=lora_config,
                 formatting_func=_formatting_func,
             )
             logger.info("SFTTrainer created, starting training...")
@@ -191,7 +178,6 @@ class SFTLauncher:
             logger.exception("SFTTrainer creation failed")
             raise
 
-        # Run training (blocking, on the event loop executor)
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(None, trainer.train)
