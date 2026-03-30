@@ -100,7 +100,7 @@ class SFTLauncher:
         # 2. Load dataset
         dataset = self._load_dataset(data_path)
 
-        # 3. Load tokenizer and model (4-bit quantized for 32GB VRAM)
+        # 3. Load tokenizer and model
         tokenizer = AutoTokenizer.from_pretrained(
             base_model_path,
             trust_remote_code=True,
@@ -108,18 +108,12 @@ class SFTLauncher:
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # 4-bit QLoRA config — fits 9B model in ~6GB, leaves room for
-        # LoRA adapters, optimizer states, and activations
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16 if config.bf16 else torch.float16,
-            bnb_4bit_use_double_quant=True,  # nested quantization saves ~0.4GB
-        )
-
+        # BF16 loading — bitsandbytes 4-bit segfaults on Qwen 3.5's
+        # Gated Delta Network layers with current driver/library combo.
+        # BF16 9B model uses ~13GB, leaves ~19GB for LoRA + optimizer.
         model = AutoModelForCausalLM.from_pretrained(
             base_model_path,
-            quantization_config=bnb_config,
+            dtype=torch.bfloat16,
             device_map="auto",
             trust_remote_code=True,
         )
