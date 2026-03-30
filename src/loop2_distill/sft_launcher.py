@@ -172,17 +172,28 @@ class SFTLauncher:
                 texts.append("\n".join(parts))
             return texts
 
-        trainer = SFTTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=dataset,
-            peft_config=lora_config,
-            formatting_func=_formatting_func,
-        )
+        try:
+            logger.info("Creating SFTTrainer...")
+            trainer = SFTTrainer(
+                model=model,
+                args=training_args,
+                train_dataset=dataset,
+                peft_config=lora_config,
+                formatting_func=_formatting_func,
+            )
+            logger.info("SFTTrainer created, starting training...")
+        except Exception:
+            logger.exception("SFTTrainer creation failed")
+            raise
 
         # Run training (blocking, on the event loop executor)
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, trainer.train)
+        try:
+            await loop.run_in_executor(None, trainer.train)
+            logger.info("Training complete")
+        except Exception:
+            logger.exception("Training failed")
+            raise
 
         # Save the adapter
         await loop.run_in_executor(None, trainer.save_model, adapter_output)
