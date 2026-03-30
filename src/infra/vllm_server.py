@@ -81,23 +81,28 @@ class LLMServer:
         self._status = ServerStatus.STARTING
         logger.info("Starting LLM server: model=%s", self.config.name)
 
-        # 1. Check if Ollama service is reachable
-        await self._ensure_ollama_running()
+        try:
+            # 1. Check if Ollama service is reachable
+            await self._ensure_ollama_running()
 
-        # 2. Ensure model is pulled
-        await self._ensure_model_available()
+            # 2. Ensure model is pulled
+            await self._ensure_model_available()
 
-        # 3. Warm up the model by loading it into GPU memory
-        await self._warmup_model()
+            # 3. Warm up the model by loading it into GPU memory
+            await self._warmup_model()
 
-        # 4. Create OpenAI-compatible client
-        self._client = openai.AsyncOpenAI(
-            base_url=self.base_url,
-            api_key="ollama",  # Ollama ignores this but openai lib requires it
-        )
+            # 4. Create OpenAI-compatible client
+            self._client = openai.AsyncOpenAI(
+                base_url=self.base_url,
+                api_key="ollama",  # Ollama ignores this but openai lib requires it
+            )
 
-        self._status = ServerStatus.READY
-        logger.info("LLM server is ready: model=%s at %s", self.config.name, self.base_url)
+            self._status = ServerStatus.READY
+            logger.info("LLM server is ready: model=%s at %s", self.config.name, self.base_url)
+        except Exception:
+            self._status = ServerStatus.STOPPED
+            logger.exception("LLM server failed to start — status reset to STOPPED")
+            raise
 
     async def stop(self) -> None:
         """Unload the model from GPU memory."""

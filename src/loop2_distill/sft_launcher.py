@@ -190,6 +190,10 @@ class SFTLauncher:
         await loop.run_in_executor(None, trainer.save_model, adapter_output)
         logger.info("LoRA adapter saved to %s", adapter_output)
 
+        # Free training VRAM (model, optimizer, etc.)
+        del trainer, model, tokenizer, processor, dataset
+        _free_gpu_memory()
+
         return adapter_output
 
     async def export_to_ollama(
@@ -201,9 +205,10 @@ class SFTLauncher:
     ) -> str:
         """Merge LoRA adapter, convert to GGUF, and import into Ollama.
 
-        Uses Unsloth's save_pretrained_gguf which handles the full
-        pipeline: merge adapter → convert to GGUF → create Modelfile.
-        Then runs ``ollama create`` to register the model.
+        Loads the *base* model first via Unsloth, then applies the LoRA
+        adapter from ``adapter_path`` using PEFT, and finally calls
+        ``save_pretrained_gguf`` which handles: merge → GGUF convert →
+        Modelfile creation.  Then runs ``ollama create`` to register.
 
         Parameters
         ----------
@@ -234,23 +239,34 @@ class SFTLauncher:
         loop = asyncio.get_event_loop()
 
         def _export() -> None:
-            # Load base model + adapter via Unsloth
-            model, processor = FastModel.from_pretrained(
-                model_name=adapter_path,  # Unsloth loads adapter from saved dir
-                max_seq_length=2048,
-                load_in_4bit=True,
-            )
-            tokenizer = (
-                processor.tokenizer if hasattr(processor, "tokenizer") else processor
-            )
+            try:
+                # Load the BASE model via Unsloth (not the adapter dir)
+                model, processor = FastModel.from_pretrained(
+                    model_name=base_model_path,
+                    max_seq_length=2048,
+                    load_in_4bit=True,
+                )
+                tokenizer = (
+                    processor.tokenizer
+                    if hasattr(processor, "tokenizer")
+                    else processor
+                )
 
-            # Save as GGUF (merges LoRA + converts + creates Modelfile)
-            model.save_pretrained_gguf(
-                gguf_dir,
-                tokenizer,
-                quantization_method=quantization,
-            )
-            logger.info("GGUF export complete: %s", gguf_dir)
+                # Apply the saved LoRA adapter on top
+                from peft import PeftModel
+                model = PeftModel.from_pretrained(model, adapter_path)
+                logger.info("LoRA adapter applied from %s", adapter_path)
+
+                # Save as GGUF (merges LoRA + converts + creates Modelfile)
+                model.save_pretrained_gguf(
+                    gguf_dir,
+                    tokenizer,
+                    quantization_method=quantization,
+                )
+                logger.info("GGUF export complete: %s", gguf_dir)
+            finally:
+                # Always free GPU memory so Ollama can load the model
+                _free_gpu_memory()
 
         await loop.run_in_executor(None, _export)
 
@@ -273,6 +289,36 @@ class SFTLauncher:
             logger.warning("No Modelfile found at %s — skipping Ollama import", modelfile_path)
 
         return ollama_model_name
+
+    # ------------------------------------------------------------------
+    # GPU memory management
+    # ------------------------------------------------------------------
+
+    async def launch_training_and_export(
+        self,
+        training_data: list[dict[str, Any]],
+        config: Loop2Config,
+        base_model_path: str,
+        ollama_model_name: str = "tokagotchi:latest",
+        quantization: str = "q4_k_m",
+    ) -> tuple[str, str]:
+        """Train LoRA then export to Ollama in one pass (saves a model reload).
+
+        Returns (adapter_path, ollama_model_name).
+        """
+        adapter_path = await self.launch_training(
+            training_data, config, base_model_path,
+        )
+        # Free training VRAM before export reload
+        _free_gpu_memory()
+
+        ollama_name = await self.export_to_ollama(
+            base_model_path=base_model_path,
+            adapter_path=adapter_path,
+            ollama_model_name=ollama_model_name,
+            quantization=quantization,
+        )
+        return adapter_path, ollama_name
 
     # ------------------------------------------------------------------
     # Adapter merging (legacy — use export_to_ollama instead)
@@ -523,3 +569,20 @@ class SFTLauncher:
                 }
 
         return await loop.run_in_executor(None, _validate)
+
+
+def _free_gpu_memory() -> None:
+    """Release all PyTorch GPU memory so Ollama can reclaim VRAM."""
+    try:
+        import torch
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            logger.info(
+                "GPU memory freed: %.0f MiB available",
+                torch.cuda.mem_get_info()[0] / 1024 / 1024,
+            )
+    except Exception as e:
+        logger.warning("Failed to free GPU memory: %s", e)

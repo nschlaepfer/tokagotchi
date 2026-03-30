@@ -360,6 +360,8 @@ class MasterLoop:
                                     f"Loop 2 SFT: {len(training_data)} examples",
                                 )
                         finally:
+                            # Free any leftover PyTorch GPU memory before Ollama restarts
+                            self._free_training_vram()
                             # Return to serving phase
                             await self.vram_scheduler.enter_serving_phase()
 
@@ -388,6 +390,21 @@ class MasterLoop:
         finally:
             self._loop_status["loop2_distill"] = "stopped"
             logger.info("Loop 2 (distillation) stopped")
+
+    @staticmethod
+    def _free_training_vram() -> None:
+        """Release all PyTorch GPU memory so Ollama can reclaim VRAM."""
+        try:
+            import gc
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+                free_mb = torch.cuda.mem_get_info()[0] / 1024 / 1024
+                logger.info("GPU memory freed before serving: %.0f MiB available", free_mb)
+        except Exception as e:
+            logger.warning("Failed to free GPU memory: %s", e)
 
     async def _collect_traces_for_buffer(self) -> None:
         """Collect rollout traces and feed corrected versions into the buffer."""

@@ -51,7 +51,7 @@ class VRAMScheduler:
         """Return the current phase as a plain string."""
         return self._phase.value
 
-    async def enter_serving_phase(self) -> None:
+    async def enter_serving_phase(self, *, max_retries: int = 3) -> None:
         """Start the vLLM server and switch to serving phase."""
         async with self._lock:
             if self._phase == Phase.SERVING:
@@ -61,7 +61,18 @@ class VRAMScheduler:
             self._phase = Phase.TRANSITIONING
             logger.info("[%s] Transitioning -> SERVING", _ts())
 
-            await self._server.start()
+            for attempt in range(1, max_retries + 1):
+                try:
+                    await self._server.start()
+                    break
+                except Exception:
+                    logger.exception(
+                        "Server start failed (attempt %d/%d)", attempt, max_retries,
+                    )
+                    if attempt == max_retries:
+                        self._phase = Phase.TRAINING  # stay in safe state
+                        raise
+                    await asyncio.sleep(10.0)
 
             self._phase = Phase.SERVING
             logger.info("[%s] Phase is now SERVING", _ts())
