@@ -19,6 +19,7 @@ dependencies = [
 training = [
     "torch>=2.4",
     "transformers>=4.45",
+    "unsloth",              # Loop 2 SFT trainer
     "peft>=0.13",            # QLoRA adapters
     "trl>=0.12",             # RL training (GRPO)
     "bitsandbytes>=0.44",    # Quantization

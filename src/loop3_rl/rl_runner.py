@@ -9,21 +9,15 @@ Designed to run within a configurable overnight window.
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from src.config import Loop3Config
-from src.models import (
-    ActionType,
-    RewardResult,
-    StepRecord,
-    TaskSpec,
-    Trajectory,
-)
+from src.models import TaskSpec, Trajectory
 from src.loop3_rl.dapo_clipping import DAPOClipper
 from src.loop3_rl.trajectory_filter import TrajectoryFilter
 from src.loop3_rl.tree_grpo import TreeGRPO
@@ -68,6 +62,11 @@ class RLRunner:
         self._peft_model: Any | None = None
         self._optimizer: Any | None = None
         self._tokenizer: Any | None = None
+        self._local_server: Any | None = None
+        self._base_model_path: str | None = None
+        self._adapter_path: str | None = None
+        self._model_label: str = ""
+        self._generation_lock = asyncio.Lock()
 
         # Progress tracking
         self._total_steps: int = 0
@@ -78,8 +77,13 @@ class RLRunner:
     # Model loading
     # ------------------------------------------------------------------
 
-    async def load_model(self, model_path: str, config: Loop3Config) -> None:
-        """Load the base model with 4-bit quantization and LoRA for RL training.
+    async def load_model(
+        self,
+        model_path: str,
+        config: Loop3Config,
+        adapter_path: str | None = None,
+    ) -> None:
+        """Load the base model plus an optional LoRA adapter for RL training.
 
         Parameters
         ----------
@@ -87,16 +91,21 @@ class RLRunner:
             Path or HuggingFace model ID.
         config:
             Loop 3 config for learning rate etc.
+        adapter_path:
+            Optional path to a previously saved LoRA adapter checkpoint.
         """
         if torch is None:
             logger.warning("PyTorch not available; skipping model load.")
             return
 
         loop = asyncio.get_event_loop()
+        resolved_adapter = str(adapter_path) if adapter_path else None
+
+        self.unload_model()
 
         def _load() -> None:
-            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-            from peft import LoraConfig, TaskType as PeftTaskType, get_peft_model
+            from peft import LoraConfig, PeftModel, TaskType as PeftTaskType, get_peft_model
+            from transformers import AutoModelForCausalLM, AutoTokenizer
 
             logger.info("Loading model for RL training: %s", model_path)
 
@@ -106,16 +115,9 @@ class RLRunner:
             if self._tokenizer.pad_token is None:
                 self._tokenizer.pad_token = self._tokenizer.eos_token
 
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16 if config.bf16 else torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-
             base_model = AutoModelForCausalLM.from_pretrained(
                 model_path,
-                quantization_config=bnb_config,
+                torch_dtype=torch.bfloat16 if config.bf16 else torch.float16,
                 device_map="auto",
                 trust_remote_code=True,
             )
@@ -132,13 +134,45 @@ class RLRunner:
                 bias="none",
             )
 
-            self._peft_model = get_peft_model(base_model, lora_config)
+            if resolved_adapter and Path(resolved_adapter).exists():
+                self._peft_model = PeftModel.from_pretrained(
+                    base_model,
+                    resolved_adapter,
+                    is_trainable=True,
+                )
+                logger.info("Loaded RL adapter checkpoint: %s", resolved_adapter)
+            else:
+                self._peft_model = get_peft_model(base_model, lora_config)
             self._peft_model.print_trainable_parameters()
+            self._peft_model.train()
 
             self._optimizer = torch.optim.AdamW(
                 self._peft_model.parameters(),
                 lr=config.learning_rate,
             )
+
+            if resolved_adapter:
+                optimizer_path = Path(resolved_adapter) / "optimizer.pt"
+                if optimizer_path.exists():
+                    try:
+                        state = torch.load(optimizer_path, map_location="cpu")
+                        self._optimizer.load_state_dict(state)
+                        logger.info("Loaded optimizer state from %s", optimizer_path)
+                    except Exception:
+                        logger.warning(
+                            "Failed to load optimizer state from %s",
+                            optimizer_path,
+                            exc_info=True,
+                        )
+
+            self._base_model_path = model_path
+            self._adapter_path = resolved_adapter
+            self._model_label = (
+                f"local:{Path(resolved_adapter).name}"
+                if resolved_adapter
+                else f"local:{Path(str(model_path)).name}"
+            )
+            self._local_server = _LocalModelServerShim(self, self._model_label)
             logger.info("RL model loaded and ready for training.")
 
         await loop.run_in_executor(None, _load)
@@ -154,6 +188,10 @@ class RLRunner:
         if self._tokenizer is not None:
             del self._tokenizer
             self._tokenizer = None
+        self._local_server = None
+        self._base_model_path = None
+        self._adapter_path = None
+        self._model_label = ""
         if torch is not None:
             torch.cuda.empty_cache()
         logger.info("RL model unloaded, VRAM freed.")
@@ -170,6 +208,7 @@ class RLRunner:
         arena_manager: Any,
         opus_client: Any,
         curriculum_engine: Any,
+        genome: Any | None = None,
     ) -> dict[str, Any]:
         """Execute the overnight RL training loop.
 
@@ -216,6 +255,7 @@ class RLRunner:
             "epochs": [],
             "final_eval": {},
             "status": "started",
+            "improved": False,
         }
 
         try:
@@ -223,9 +263,19 @@ class RLRunner:
             logger.info("Entering training phase (stopping vLLM)...")
             await vram_scheduler.enter_training_phase()
 
-            # Step 2: load latest checkpoint
-            base_model_path = await self._resolve_latest_checkpoint(vllm_server)
-            logger.info("Base model for RL: %s", base_model_path)
+            # Step 2: load the trainable HF model plus any saved adapter
+            base_model_path, adapter_path = await self._resolve_latest_checkpoint(
+                vllm_server
+            )
+            logger.info(
+                "Base model for RL: %s (adapter=%s)",
+                base_model_path,
+                adapter_path or "none",
+            )
+            await self.load_model(base_model_path, config, adapter_path=adapter_path)
+            if self._local_server is None:
+                raise RuntimeError("Loop 3 requires a locally loaded trainable model.")
+            rollout_server = self._local_server
 
             # Step 3: sample frontier tasks
             tasks = self._sample_tasks(curriculum_engine, config)
@@ -243,7 +293,11 @@ class RLRunner:
 
             # Pre-training evaluation (baseline)
             baseline_score = await self._evaluate_checkpoint(
-                base_model_path, eval_tasks, vllm_server, arena_manager
+                base_model_path,
+                eval_tasks,
+                rollout_server,
+                arena_manager,
+                genome=genome or _get_default_genome(),
             )
             run_metrics["baseline_score"] = baseline_score
             logger.info("Baseline eval score: %.4f", baseline_score)
@@ -263,16 +317,25 @@ class RLRunner:
                     epoch=epoch,
                     tasks=train_tasks,
                     base_model_path=base_model_path,
-                    vllm_server=vllm_server,
+                    rollout_server=rollout_server,
                     arena_manager=arena_manager,
                     opus_client=opus_client,
                     config=config,
+                    genome=genome or _get_default_genome(),
                 )
                 run_metrics["epochs"].append(epoch_metrics)
 
+            # Persist the final trainable state before scoring.
+            last_checkpoint = await self._save_checkpoint(base_model_path, "last")
+            run_metrics["last_checkpoint"] = last_checkpoint
+
             # Step 5: post-training evaluation
             final_score = await self._evaluate_checkpoint(
-                base_model_path, eval_tasks, vllm_server, arena_manager
+                base_model_path,
+                eval_tasks,
+                rollout_server,
+                arena_manager,
+                genome=genome or _get_default_genome(),
             )
             run_metrics["final_eval"] = {
                 "score": final_score,
@@ -289,6 +352,8 @@ class RLRunner:
                 )
                 best_checkpoint = await self._save_checkpoint(base_model_path, "best")
                 run_metrics["status"] = "improved"
+                run_metrics["best_checkpoint"] = best_checkpoint
+                run_metrics["improved"] = True
             elif final_score < baseline_score * 0.95:
                 logger.warning(
                     "Regression detected (>5%%): %.4f -> %.4f; rolling back",
@@ -305,19 +370,17 @@ class RLRunner:
                 )
                 run_metrics["status"] = "no_change"
 
-            # Step 7: re-enter serving phase
-            logger.info("Entering serving phase (restarting vLLM)...")
-            await vram_scheduler.enter_serving_phase()
-
         except Exception:
             logger.exception("Overnight RL run failed")
             run_metrics["status"] = "error"
-            # Best-effort: try to restore serving
+            raise
+        finally:
+            self.unload_model()
             try:
+                logger.info("Entering serving phase (restarting vLLM)...")
                 await vram_scheduler.enter_serving_phase()
             except Exception:
-                logger.exception("Failed to restore serving phase after error")
-            raise
+                logger.exception("Failed to restore serving phase after RL run")
 
         wall_time = time.monotonic() - self._start_time
         run_metrics["wall_time_seconds"] = round(wall_time, 2)
@@ -381,10 +444,11 @@ class RLRunner:
         epoch: int,
         tasks: list[TaskSpec],
         base_model_path: str,
-        vllm_server: Any,
+        rollout_server: Any,
         arena_manager: Any,
         opus_client: Any,
         config: Loop3Config,
+        genome: Any,
     ) -> dict[str, Any]:
         """Run a single training epoch.
 
@@ -398,15 +462,12 @@ class RLRunner:
         total_filtered = 0
         total_generated = 0
 
-        # Retrieve a default genome for rollouts
-        genome = _get_default_genome()
-
         for task_idx, task in enumerate(tasks):
             # 4a. Generate tree rollouts
             try:
                 trajectories = await self._tree_grpo.generate_tree_rollouts(
                     task=task,
-                    vllm_server=vllm_server,
+                    vllm_server=rollout_server,
                     arena_manager=arena_manager,
                     genome=genome,
                     config=config,
@@ -578,7 +639,8 @@ class RLRunner:
             if self._peft_model is not None and self._optimizer is not None:
                 return self._real_training_step(batch, config)
 
-            # Fallback: compute loss from batch tensors (pipeline validation)
+            # Last-resort guard: no model was loaded, so preserve the pipeline
+            # shape with a no-op surrogate instead of crashing the run.
             advantages = batch["advantages"]
             old_log_probs = batch["old_log_probs"]
             new_log_probs = old_log_probs + torch.randn_like(old_log_probs) * 0.01
@@ -605,26 +667,28 @@ class RLRunner:
 
         advantages = batch["advantages"]
         old_log_probs = batch["old_log_probs"]
+        messages = batch.get("messages", [])
         texts = batch.get("texts", [])
 
-        if not texts:
-            # Fallback if no texts in batch
-            new_log_probs = old_log_probs + torch.randn_like(old_log_probs) * 0.01
-            loss = self._dapo.compute_policy_loss(
-                log_probs_new=new_log_probs,
-                log_probs_old=old_log_probs,
-                advantages=advantages,
-                config=config.dapo,
-            )
-            return loss.item()
+        if not messages and not texts:
+            raise RuntimeError("Training batch is missing transcript texts.")
 
-        # Tokenize and forward pass
+        # Tokenize and forward pass on the exact transcript text used to
+        # build the rollout. This keeps the policy update real and traceable.
         model.train()
         total_loss = 0.0
         n_chunks = 0
 
-        for i in range(0, len(texts), 4):  # mini-batch of 4
-            chunk_texts = texts[i : i + 4]
+        source_rows = messages if messages else texts
+
+        for i in range(0, len(source_rows), 4):  # mini-batch of 4
+            chunk_rows = source_rows[i : i + 4]
+            if messages:
+                chunk_texts = [
+                    _messages_to_prompt(row, tokenizer) for row in chunk_rows
+                ]
+            else:
+                chunk_texts = chunk_rows
             chunk_adv = advantages[i : i + 4] if i + 4 <= len(advantages) else advantages[i:]
             chunk_old_lp = old_log_probs[i : i + 4] if i + 4 <= len(old_log_probs) else old_log_probs[i:]
 
@@ -634,7 +698,8 @@ class RLRunner:
                 padding=True,
                 truncation=True,
                 max_length=2048,
-            ).to(model.device)
+            )
+            inputs = inputs.to(self._input_device(model))
 
             outputs = model(**inputs)
             logits = outputs.logits
@@ -646,7 +711,8 @@ class RLRunner:
             new_log_probs_seq = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
 
             # Mean log-prob per sequence
-            mask = (shift_labels != tokenizer.pad_token_id).float()
+            pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+            mask = (shift_labels != pad_token_id).float()
             new_lp = (new_log_probs_seq * mask).sum(dim=-1) / mask.sum(dim=-1).clamp(min=1)
 
             loss = self._dapo.compute_policy_loss(
@@ -675,23 +741,24 @@ class RLRunner:
         self,
         model_path: str,
         eval_tasks: list[TaskSpec],
-        vllm_server: Any,
+        rollout_server: Any,
         arena_manager: Any,
+        genome: Any | None = None,
     ) -> float:
         """Evaluate a checkpoint on held-out tasks and return a score."""
         if not eval_tasks:
             return 0.0
 
-        genome = _get_default_genome()
+        rollout_genome = genome or _get_default_genome()
         successes = 0
 
         for task in eval_tasks:
             try:
                 trajs = await self._tree_grpo.generate_tree_rollouts(
                     task=task,
-                    vllm_server=vllm_server,
+                    vllm_server=rollout_server,
                     arena_manager=arena_manager,
-                    genome=genome,
+                    genome=rollout_genome,
                     config=self.config,
                 )
                 if any(t.success for t in trajs):
@@ -707,23 +774,22 @@ class RLRunner:
     # Internal: checkpoint management
     # ------------------------------------------------------------------
 
-    async def _resolve_latest_checkpoint(self, vllm_server: Any) -> str:
-        """Determine the path to the latest model checkpoint.
+    async def _resolve_latest_checkpoint(self, vllm_server: Any) -> tuple[str, str | None]:
+        """Resolve the HF base model and the latest available adapter."""
+        base_model_path = getattr(vllm_server.config, "hf_model_path", "") or vllm_server.config.name
 
-        Checks for Loop 2 LoRA adapters first, then falls back to the
-        base model specified in the server configuration.
-        """
-        # Check for a Loop 2 checkpoint
-        loop2_dir = self.output_dir.parent / "loop2"
-        if loop2_dir.exists():
-            adapters = sorted(loop2_dir.glob("adapter_*"), key=lambda p: p.stat().st_mtime)
-            if adapters:
-                latest = str(adapters[-1])
-                logger.info("Found Loop 2 adapter: %s", latest)
-                return latest
+        candidates: list[Path] = []
+        candidates.extend(sorted(self.output_dir.glob("rl_*"), key=lambda p: p.stat().st_mtime))
+        candidates.extend(
+            sorted(self.output_dir.parent.glob("adapter_*"), key=lambda p: p.stat().st_mtime)
+        )
 
-        # Fall back to base model
-        return vllm_server.config.name
+        if candidates:
+            latest = max(candidates, key=lambda p: p.stat().st_mtime)
+            logger.info("Found latest checkpoint candidate: %s", latest)
+            return base_model_path, str(latest)
+
+        return base_model_path, None
 
     async def _save_checkpoint(self, model_path: str, tag: str) -> str:
         """Save the current model state as a named checkpoint."""
@@ -731,8 +797,6 @@ class RLRunner:
         ckpt_dir = self.output_dir / f"rl_{tag}_{ts}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Write a metadata marker
-        meta_path = ckpt_dir / "metadata.json"
         import json
 
         meta = {
@@ -747,6 +811,20 @@ class RLRunner:
                 "total_epochs": self.config.total_epochs,
             },
         }
+
+        if self._peft_model is not None and self._tokenizer is not None:
+            self._peft_model.save_pretrained(str(ckpt_dir))
+            self._tokenizer.save_pretrained(str(ckpt_dir))
+            if self._optimizer is not None and torch is not None:
+                torch.save(self._optimizer.state_dict(), ckpt_dir / "optimizer.pt")
+            logger.info("Saved trainable RL checkpoint to %s", ckpt_dir)
+        else:
+            logger.warning(
+                "Saving checkpoint without a loaded model; metadata only at %s",
+                ckpt_dir,
+            )
+
+        meta_path = ckpt_dir / "metadata.json"
         meta_path.write_text(json.dumps(meta, indent=2))
         logger.info("Checkpoint saved: %s", ckpt_dir)
         return str(ckpt_dir)
@@ -760,6 +838,92 @@ class RLRunner:
         logger.info("Rolling back: discarding current RL LoRA delta for %s", model_path)
         # The rollback is implicit: we simply don't save the new checkpoint,
         # so the serving phase will reload the prior best.
+
+    def _input_device(self, model: Any) -> Any:
+        """Best-effort device for tokenized inputs."""
+        try:
+            if hasattr(model, "device"):
+                return model.device
+            return next(model.parameters()).device
+        except Exception:
+            return "cpu"
+
+    async def _local_chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        top_p: float = 1.0,
+        think: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Expose a chat-completion shaped API backed by the loaded HF model."""
+        del think, kwargs
+
+        if self._peft_model is None or self._tokenizer is None:
+            raise RuntimeError("Local RL model is not loaded.")
+
+        async with self._generation_lock:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                lambda: self._generate_local_response(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                ),
+            )
+
+    def _generate_local_response(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        top_p: float,
+    ) -> Any:
+        """Synchronously generate one action and its sequence log-probability."""
+        if self._peft_model is None or self._tokenizer is None or torch is None:
+            raise RuntimeError("Local RL model is not available.")
+
+        model = self._peft_model
+        tokenizer = self._tokenizer
+        prompt = _messages_to_prompt(messages, tokenizer)
+        inputs = tokenizer(prompt, return_tensors="pt")
+        inputs = inputs.to(self._input_device(model))
+
+        model.eval()
+        with torch.no_grad():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=temperature > 0,
+                temperature=max(temperature, 1e-5),
+                top_p=top_p,
+                return_dict_in_generate=True,
+                output_scores=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        sequences = output.sequences[0]
+        prompt_len = inputs["input_ids"].shape[-1]
+        generated_ids = sequences[prompt_len:]
+        text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+        sample_logprob = _scores_to_logprob(output.scores, generated_ids)
+
+        message = SimpleNamespace(
+            role="assistant",
+            content=text,
+            reasoning="",
+        )
+        choice = SimpleNamespace(message=message)
+        return SimpleNamespace(
+            choices=[choice],
+            sample_logprob=sample_logprob,
+            model=self._model_label or "local",
+        )
 
     # ------------------------------------------------------------------
     # Internal: task sampling
@@ -819,3 +983,61 @@ def _get_default_genome() -> Any:
             "Think step by step and verify your work before submitting."
         ),
     )
+
+
+def _messages_to_prompt(messages: list[dict[str, str]], tokenizer: Any) -> str:
+    """Render messages into a prompt string using the tokenizer when possible."""
+    if hasattr(tokenizer, "apply_chat_template"):
+        try:
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception:
+            pass
+
+    return "\n".join(f"{m['role']}: {m['content']}" for m in messages) + "\nassistant:"
+
+
+def _scores_to_logprob(scores: Any, generated_ids: Any) -> float:
+    """Sum token log-probabilities from generation scores."""
+    if torch is None or not scores:
+        return 0.0
+
+    total = 0.0
+    try:
+        for step_idx, step_scores in enumerate(scores):
+            token_id = int(generated_ids[step_idx])
+            log_probs = torch.log_softmax(step_scores[0], dim=-1)
+            total += float(log_probs[token_id].item())
+    except Exception:
+        return 0.0
+    return total
+
+
+class _LocalModelServerShim:
+    """Minimal chat-completion shim backed by the loaded HF/PEFT model."""
+
+    def __init__(self, runner: RLRunner, name: str) -> None:
+        self._runner = runner
+        self.config = SimpleNamespace(name=name)
+
+    async def chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+        stop: str | list[str] | None = None,
+        top_p: float = 1.0,
+        think: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        del stop, think, kwargs
+        return await self._runner._local_chat_completion(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+        )

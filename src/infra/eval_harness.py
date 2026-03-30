@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from src.models import EvalResult, PromptGenome, TaskSpec, TaskType, Trajectory
+from src.models import ActionType, EvalResult, PromptGenome, StepRecord, TaskSpec, TaskType, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,8 @@ class EvalHarness:
         trajectories: list[Trajectory] = []
         successes = 0
         total_steps = 0
-        correct_tool_uses = 0
-        total_tool_uses = 0
+        tool_steps = 0
+        action_type_counts: dict[str, int] = {}
         failure_patterns: dict[str, int] = {}
 
         for task in tasks:
@@ -109,18 +109,26 @@ class EvalHarness:
 
                         # Execute in arena
                         step_result = await game.step(action_text)
-
-                        from src.models import ActionType, StepRecord
+                        action_type_name = str(
+                            step_result.info.get("action_type")
+                            or _infer_action_type_name(action_text)
+                        )
+                        action_type = _safe_action_type(action_type_name)
 
                         record = StepRecord(
                             step_idx=step_idx,
-                            action_type=ActionType.BASH,
+                            action_type=action_type,
                             action_content=action_text,
                             observation=step_result.observation,
                             reward=step_result.reward,
                         )
                         trajectory.steps.append(record)
-                        total_tool_uses += 1
+                        total_steps += 1
+                        if action_type != ActionType.THINK:
+                            tool_steps += 1
+                        action_type_counts[action_type.value] = (
+                            action_type_counts.get(action_type.value, 0) + 1
+                        )
 
                         messages.append({"role": "assistant", "content": action_text})
                         messages.append({"role": "user", "content": step_result.observation})
@@ -134,12 +142,10 @@ class EvalHarness:
 
                     if trajectory.success:
                         successes += 1
-                        correct_tool_uses += step_idx
                     else:
                         pattern = _classify_failure(trajectory)
                         failure_patterns[pattern] = failure_patterns.get(pattern, 0) + 1
 
-                    total_steps += trajectory.num_steps
                     trajectories.append(trajectory)
 
             except Exception as exc:
@@ -154,18 +160,19 @@ class EvalHarness:
             tasks_run=n_tasks,
             success_rate=successes / n_tasks if n_tasks > 0 else 0.0,
             avg_steps=total_steps / n_tasks if n_tasks > 0 else 0.0,
-            tool_accuracy=correct_tool_uses / total_tool_uses if total_tool_uses > 0 else 0.0,
+            tool_accuracy=tool_steps / total_steps if total_steps > 0 else 0.0,
             code_quality=_estimate_code_quality(trajectories),
             trajectories=trajectories,
             failure_patterns=failure_patterns,
         )
 
         logger.info(
-            "Evaluation complete (%.1fs): success=%.2f avg_steps=%.1f tasks=%d",
+            "Evaluation complete (%.1fs): success=%.2f avg_steps=%.1f tasks=%d action_types=%s",
             elapsed,
             result.success_rate,
             result.avg_steps,
             n_tasks,
+            action_type_counts,
         )
 
         return result
@@ -244,26 +251,34 @@ class EvalHarness:
     # ------------------------------------------------------------------
 
     def load_benchmark_tasks(self, path: str) -> list[TaskSpec]:
-        """Load held-out evaluation tasks from a JSON file.
+        """Load benchmark tasks from a JSON file or directory.
 
         Parameters
         ----------
         path:
-            Path to a JSON file containing a list of task specifications.
+            Path to a JSON file containing a list of task specifications or
+            a directory containing one or more JSON/JSONL task files.
 
         Returns
         -------
         list[TaskSpec]
             Parsed task specifications.
         """
-        task_path = Path(path)
-        if not task_path.exists():
-            logger.warning("Benchmark tasks file not found: %s", path)
+        task_path = self._resolve_task_source(Path(path))
+        if task_path is None:
+            logger.warning("Benchmark task source not found: %s", path)
             return []
 
         try:
-            with open(task_path) as f:
-                raw_tasks = json.load(f)
+            if task_path.suffix.lower() == ".jsonl":
+                raw_tasks = [
+                    json.loads(line)
+                    for line in task_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+            else:
+                with open(task_path) as f:
+                    raw_tasks = json.load(f)
 
             tasks: list[TaskSpec] = []
             for raw in raw_tasks:
@@ -284,11 +299,11 @@ class EvalHarness:
                     metadata=raw.get("metadata", {}),
                 ))
 
-            logger.info("Loaded %d benchmark tasks from %s", len(tasks), path)
+            logger.info("Loaded %d benchmark tasks from %s", len(tasks), task_path)
             return tasks
 
         except (json.JSONDecodeError, OSError) as exc:
-            logger.error("Failed to load benchmark tasks from %s: %s", path, exc)
+            logger.error("Failed to load benchmark tasks from %s: %s", task_path, exc)
             return []
 
     # ------------------------------------------------------------------
@@ -344,6 +359,27 @@ class EvalHarness:
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(out_path)
         logger.info("Saved eval results to %s", path)
+
+    @staticmethod
+    def _resolve_task_source(path: Path) -> Path | None:
+        """Resolve a file path from a file or directory input."""
+        if path.is_file():
+            return path
+
+        if not path.is_dir():
+            return None
+
+        candidates = [
+            p for p in path.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".json", ".jsonl"}
+        ]
+        if not candidates:
+            return None
+
+        return sorted(
+            candidates,
+            key=lambda p: (-p.stat().st_mtime, p.name.lower()),
+        )[0]
 
 
 # ---------------------------------------------------------------------------
@@ -402,3 +438,33 @@ def _estimate_code_quality(trajectories: list[Trajectory]) -> float:
         scores.append(min(score, 1.0))
 
     return sum(scores) / len(scores)
+
+
+def _safe_action_type(action_type_name: str) -> ActionType:
+    """Best-effort conversion from a parsed action type name."""
+    try:
+        return ActionType(action_type_name.strip().lower())
+    except ValueError:
+        return ActionType.THINK
+
+
+def _infer_action_type_name(raw: str) -> str:
+    """Infer an action type name from raw assistant output."""
+    cleaned = re.sub(r"<think>.*?</think>\s*", "", raw.strip(), flags=re.DOTALL)
+    cleaned = re.sub(r"^</think>\s*", "", cleaned, flags=re.DOTALL).strip() or raw.strip()
+
+    patterns = (
+        re.compile(r"^\[?(?P<action_type>think|bash|python|read_file|write_file|sql|api_call|submit)\]?\s*:\s*", re.IGNORECASE),
+        re.compile(r"^\[(?P<action_type>think|bash|python|read_file|write_file|sql|api_call|submit)\s+[^\]]+\]", re.IGNORECASE),
+    )
+
+    for candidate in [cleaned, *cleaned.splitlines()]:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        for pattern in patterns:
+            match = pattern.match(candidate)
+            if match:
+                return match.group("action_type").lower()
+
+    return "think"

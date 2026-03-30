@@ -12,6 +12,7 @@ import asyncio
 import copy
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from src.config import Loop3Config
@@ -24,6 +25,11 @@ from src.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+SampleActionFn = Callable[
+    [list[dict[str, str]], float, float, int],
+    Awaitable[Any],
+]
 
 # ---------------------------------------------------------------------------
 # Conditional torch import
@@ -53,6 +59,7 @@ class TreeGRPO:
         arena_manager: Any,
         genome: Any,
         config: Loop3Config,
+        sample_action_fn: SampleActionFn | None = None,
     ) -> list[Trajectory]:
         """Generate K rollouts that share a common prefix.
 
@@ -97,22 +104,34 @@ class TreeGRPO:
                 break
 
             response = await _sample_action(
-                vllm_server, messages, config, temperature=config.rollout_temperature
+                vllm_server,
+                messages,
+                config,
+                temperature=config.rollout_temperature,
+                sample_action_fn=sample_action_fn,
             )
-            step_result = await prefix_game.step(response)
+            response_text, sample_logprob = _unpack_sample_result(response)
+            step_result = await prefix_game.step(response_text)
 
             record = StepRecord(
                 step_idx=step_idx,
-                action_type=_parse_action_type(response),
-                action_content=response,
+                action_type=_parse_action_type(response_text),
+                action_content=response_text,
                 observation=step_result.observation,
                 reasoning="",
                 reward=step_result.reward,
-                metadata=step_result.info,
+                metadata={
+                    **step_result.info,
+                    **(
+                        {"sample_logprob": sample_logprob}
+                        if sample_logprob is not None
+                        else {}
+                    ),
+                },
             )
             prefix_steps.append(record)
 
-            messages.append({"role": "assistant", "content": response})
+            messages.append({"role": "assistant", "content": response_text})
             if step_result.observation:
                 messages.append({"role": "user", "content": step_result.observation})
 
@@ -137,6 +156,7 @@ class TreeGRPO:
                 arena_manager=arena_manager,
                 genome=genome,
                 config=config,
+                sample_action_fn=sample_action_fn,
             )
             for i in range(branching_factor)
         ]
@@ -233,7 +253,7 @@ class TreeGRPO:
         dict
             Batch dictionary with keys:
             ``input_ids``, ``attention_mask``, ``advantages``,
-            ``old_log_probs``, ``metadata``.
+            ``old_log_probs``, ``messages``, ``texts``, ``metadata``.
         """
         if torch is None:
             raise RuntimeError(
@@ -245,6 +265,8 @@ class TreeGRPO:
         batch_advantages: list[float] = []
         batch_old_log_probs: list[float] = []
         batch_metadata: list[dict[str, Any]] = []
+        batch_texts: list[str] = []
+        batch_messages: list[list[dict[str, str]]] = []
 
         for task_trajs, task_advs in zip(all_trajectories, all_advantages):
             for traj, adv in zip(task_trajs, task_advs):
@@ -252,9 +274,7 @@ class TreeGRPO:
                 batch_input_ids.append(tokens)
                 batch_attention_mask.append([1] * len(tokens))
                 batch_advantages.append(adv)
-                # Placeholder — the caller must run a reference forward pass
-                # to fill in actual old log-probs before the gradient step.
-                batch_old_log_probs.append(0.0)
+                batch_old_log_probs.append(_trajectory_logprob(traj))
                 batch_metadata.append(
                     {
                         "trajectory_id": traj.trajectory_id,
@@ -263,6 +283,8 @@ class TreeGRPO:
                         "advantage": adv,
                     }
                 )
+                batch_texts.append(_trajectory_to_text(traj))
+                batch_messages.append(_trajectory_to_messages(traj))
 
         # Pad to uniform length
         max_len = max((len(ids) for ids in batch_input_ids), default=0)
@@ -277,6 +299,8 @@ class TreeGRPO:
             "advantages": torch.tensor(batch_advantages, dtype=torch.float32),
             "old_log_probs": torch.tensor(batch_old_log_probs, dtype=torch.float32),
             "metadata": batch_metadata,
+            "texts": batch_texts,
+            "messages": batch_messages,
         }
 
 
@@ -290,11 +314,28 @@ async def _sample_action(
     messages: list[dict[str, str]],
     config: Loop3Config,
     temperature: float | None = None,
-) -> str:
+    sample_action_fn: SampleActionFn | None = None,
+) -> Any:
     """Request a single action from the model via the vLLM server."""
-    client = vllm_server._client  # AsyncOpenAI client
     temp = temperature if temperature is not None else config.rollout_temperature
 
+    if sample_action_fn is not None:
+        return await sample_action_fn(
+            messages,
+            temp,
+            config.rollout_top_p,
+            1024,
+        )
+
+    if hasattr(vllm_server, "chat_completion"):
+        return await vllm_server.chat_completion(
+            messages=messages,
+            temperature=temp,
+            top_p=config.rollout_top_p,
+            max_tokens=1024,
+        )
+
+    client = vllm_server._client  # AsyncOpenAI client
     response = await client.chat.completions.create(
         model=vllm_server.config.name,
         messages=messages,  # type: ignore[arg-type]
@@ -302,7 +343,35 @@ async def _sample_action(
         top_p=config.rollout_top_p,
         max_tokens=1024,
     )
-    return response.choices[0].message.content or ""
+    return response
+
+
+def _unpack_sample_result(result: Any) -> tuple[str, float | None]:
+    """Normalize sampling callback results to ``(text, logprob)``."""
+    if isinstance(result, tuple):
+        text = str(result[0] or "")
+        logprob = result[1] if len(result) > 1 else None
+        if logprob is not None:
+            try:
+                logprob = float(logprob)
+            except (TypeError, ValueError):
+                logprob = None
+        return text, logprob
+
+    if hasattr(result, "choices"):
+        try:
+            text = result.choices[0].message.content or ""
+        except Exception:
+            text = ""
+        logprob = getattr(result, "sample_logprob", None)
+        if logprob is not None:
+            try:
+                logprob = float(logprob)
+            except (TypeError, ValueError):
+                logprob = None
+        return text, logprob
+
+    return str(result or ""), None
 
 
 def _parse_action_type(raw: str) -> ActionType:
@@ -328,6 +397,7 @@ async def _run_branch(
     arena_manager: Any,
     genome: Any,
     config: Loop3Config,
+    sample_action_fn: SampleActionFn | None = None,
 ) -> Trajectory:
     """Run a single continuation branch from the shared prefix."""
     from src.arena.game import AgentArenaGame
@@ -362,22 +432,34 @@ async def _run_branch(
 
     while not done and step_idx < max_suffix_steps:
         response = await _sample_action(
-            vllm_server, messages, config, temperature=config.rollout_temperature
+            vllm_server,
+            messages,
+            config,
+            temperature=config.rollout_temperature,
+            sample_action_fn=sample_action_fn,
         )
-        result = await game.step(response)
+        response_text, sample_logprob = _unpack_sample_result(response)
+        result = await game.step(response_text)
 
         record = StepRecord(
             step_idx=step_idx,
-            action_type=_parse_action_type(response),
-            action_content=response,
+            action_type=_parse_action_type(response_text),
+            action_content=response_text,
             observation=result.observation,
             reasoning="",
             reward=result.reward,
-            metadata=result.info,
+            metadata={
+                **result.info,
+                **(
+                    {"sample_logprob": sample_logprob}
+                    if sample_logprob is not None
+                    else {}
+                ),
+            },
         )
         all_steps.append(record)
 
-        messages.append({"role": "assistant", "content": response})
+        messages.append({"role": "assistant", "content": response_text})
         if result.observation:
             messages.append({"role": "user", "content": result.observation})
 
@@ -435,3 +517,67 @@ def _trajectory_to_token_ids(trajectory: Trajectory) -> list[int]:
         encoded = step.action_content.encode("utf-8", errors="replace")
         token_ids.extend(list(encoded))
     return token_ids if token_ids else [0]
+
+
+def _trajectory_logprob(trajectory: Trajectory) -> float:
+    """Sum any stored per-step log-probabilities for a trajectory."""
+    total = 0.0
+    found = False
+    for step in trajectory.steps:
+        value = step.metadata.get("sample_logprob")
+        if value is None:
+            continue
+        try:
+            total += float(value)
+            found = True
+        except (TypeError, ValueError):
+            continue
+    return total if found else 0.0
+
+
+def _trajectory_to_text(trajectory: Trajectory) -> str:
+    """Render a trajectory into a chat-style training transcript."""
+    messages = _trajectory_to_messages(trajectory)
+    return "\n".join(
+        f"{message['role']}: {message['content']}" for message in messages
+    )
+
+
+def _trajectory_to_messages(trajectory: Trajectory) -> list[dict[str, str]]:
+    """Render a trajectory into chat messages for model scoring."""
+    messages: list[dict[str, str]] = [
+        {
+            "role": "system",
+            "content": (
+                "You are a skilled coding and problem-solving agent. "
+                "Use the available tools to complete the task. "
+                "Think step by step and verify your work before submitting."
+            ),
+        },
+        {
+            "role": "user",
+            "content": trajectory.task.description if trajectory.task else "",
+        },
+    ]
+
+    for step in trajectory.steps:
+        messages.append(
+            {
+                "role": "assistant",
+                "content": _render_step_action(step),
+            }
+        )
+        if step.observation:
+            messages.append({"role": "user", "content": step.observation})
+
+    return messages
+
+
+def _render_step_action(step: StepRecord) -> str:
+    """Render a step in the action syntax the agent is trained on."""
+    raw = step.action_content.strip()
+    if step.action_type == ActionType.THINK:
+        return f"[think]: {raw}"
+    if raw.startswith("["):
+        return raw
+    return f"[{step.action_type.value}]: {raw}"

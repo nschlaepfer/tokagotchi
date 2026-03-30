@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 from pathlib import Path
 
 _project_root = Path(__file__).resolve().parent.parent
@@ -188,7 +189,20 @@ async def main(args: argparse.Namespace) -> None:
                     config=cfg.loop2,
                     base_model_path=hf_model,
                 )
-                print(f"\nSFT training complete. Checkpoint: {checkpoint}")
+                deployment_ts = time.strftime("%Y%m%d_%H%M%S")
+                merged_path = str(data_dir / "checkpoints" / f"merged_{deployment_ts}")
+                deployed_tag = await sft_launcher.deploy_adapter(
+                    base_model_path=hf_model,
+                    adapter_path=checkpoint,
+                    tag=f"tokagotchi-loop2:{deployment_ts}",
+                    merged_output_path=merged_path,
+                )
+                cfg.model.name = deployed_tag
+                vllm_server.config.name = deployed_tag
+                print(
+                    f"\nSFT training complete. Checkpoint: {checkpoint}\n"
+                    f"Deployed merged model to Ollama tag: {deployed_tag}"
+                )
             finally:
                 # Return to serving phase
                 await vram_scheduler.enter_serving_phase()

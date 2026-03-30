@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -358,6 +357,11 @@ class SFTLauncher:
             tokenizer = AutoTokenizer.from_pretrained(
                 base_model_path, trust_remote_code=True
             )
+            if tokenizer.pad_token_id is None:
+                if tokenizer.eos_token is not None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                elif tokenizer.unk_token is not None:
+                    tokenizer.pad_token = tokenizer.unk_token
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_path,
                 torch_dtype=torch.bfloat16,
@@ -367,6 +371,16 @@ class SFTLauncher:
 
             model = PeftModel.from_pretrained(base_model, adapter_path)
             merged = model.merge_and_unload()
+            generation_config = getattr(merged, "generation_config", None)
+            if generation_config is not None:
+                pad_token_id = tokenizer.pad_token_id
+                eos_token_id = tokenizer.eos_token_id
+                if pad_token_id is None or pad_token_id < 0:
+                    pad_token_id = eos_token_id
+                if pad_token_id is not None and pad_token_id >= 0:
+                    generation_config.pad_token_id = pad_token_id
+                if eos_token_id is not None and eos_token_id >= 0:
+                    generation_config.eos_token_id = eos_token_id
 
             output = Path(output_path)
             output.mkdir(parents=True, exist_ok=True)
@@ -375,6 +389,75 @@ class SFTLauncher:
 
         await loop.run_in_executor(None, _merge)
         logger.info("Merged model saved to %s", output_path)
+
+    async def import_to_ollama(
+        self,
+        model_path: str,
+        tag: str,
+    ) -> bool:
+        """Import a merged HF checkpoint into Ollama as a local model tag.
+
+        Parameters
+        ----------
+        model_path:
+            Directory containing the merged HuggingFace checkpoint.
+        tag:
+            Ollama tag to create.
+        """
+        model_dir = Path(model_path).resolve()
+        if not model_dir.is_dir():
+            raise FileNotFoundError(f"Merged model directory not found: {model_dir}")
+
+        if not any(model_dir.glob("*.safetensors")):
+            raise FileNotFoundError(
+                f"No safetensors files found in merged model directory: {model_dir}"
+            )
+
+        modelfile_path = model_dir / "Modelfile"
+        modelfile_path.write_text(f'FROM "{model_dir}"\n', encoding="utf-8")
+
+        logger.info("Importing merged checkpoint into Ollama as %s", tag)
+        proc = await asyncio.create_subprocess_exec(
+            "ollama",
+            "create",
+            tag,
+            "-f",
+            str(modelfile_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            logger.error(
+                "Ollama import failed for %s: %s",
+                tag,
+                stdout.decode(errors="replace"),
+            )
+            return False
+
+        logger.info("Imported Ollama model tag %s from %s", tag, model_dir)
+        return True
+
+    async def deploy_adapter(
+        self,
+        base_model_path: str,
+        adapter_path: str,
+        tag: str,
+        merged_output_path: str,
+    ) -> str:
+        """Merge a LoRA adapter and import the merged checkpoint into Ollama.
+
+        Returns the Ollama tag to serve on success.
+        """
+        await self.merge_adapter(
+            base_model_path=base_model_path,
+            adapter_path=adapter_path,
+            output_path=merged_output_path,
+        )
+        ok = await self.import_to_ollama(merged_output_path, tag)
+        if not ok:
+            raise RuntimeError(f"Failed to import merged checkpoint into Ollama: {tag}")
+        return tag
 
     # ------------------------------------------------------------------
     # Checkpoint validation

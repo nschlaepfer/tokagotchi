@@ -4,12 +4,13 @@ MasterLoop runs continuously, coordinating:
 - Loop 1 (GEPA): prompt evolution (continuous)
 - Loop 2 (distillation): SFT when the pending buffer is ready
 - Loop 3 (RL): overnight Tree-GRPO + DAPO training
-- Periodic evaluation against held-out benchmarks
+- Periodic evaluation against benchmark tasks
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import signal
 import time
@@ -190,6 +191,17 @@ class MasterLoop:
         seed_tasks = self.eval_harness.load_benchmark_tasks(
             str(data_dir / "curriculum" / "seed_tasks.json")
         )
+        _, benchmark_source = self._resolve_benchmark_path()
+        if benchmark_source == "seed_holdout_fallback":
+            loop1_tasks, eval_tasks = self._split_seed_holdout(seed_tasks)
+            logger.warning(
+                "No separate benchmark tasks found; using deterministic seed holdout "
+                "(train=%d eval=%d)",
+                len(loop1_tasks),
+                len(eval_tasks),
+            )
+        else:
+            loop1_tasks = seed_tasks
         if getattr(cfg.loop1, "use_dspy_gepa", False):
             from src.loop1_gepa.dspy_gepa_engine import DspyGEPAEngine
             self._gepa_engine = DspyGEPAEngine(
@@ -197,7 +209,7 @@ class MasterLoop:
                 opus_client=self.opus_client,
                 vllm_server=self.vllm_server,
                 arena_manager=self.arena_manager,
-                tasks=seed_tasks,
+                tasks=loop1_tasks,
                 data_dir=data_dir / "loop1_gepa",
             )
             logger.info("Loop 1 engine: DspyGEPAEngine (real DSPy GEPA)")
@@ -207,7 +219,7 @@ class MasterLoop:
                 opus_client=self.opus_client,
                 vllm_server=self.vllm_server,
                 arena_manager=self.arena_manager,
-                tasks=seed_tasks,
+                tasks=loop1_tasks,
                 data_dir=data_dir,
             )
             logger.info("Loop 1 engine: GEPAEngine (custom)")
@@ -283,6 +295,7 @@ class MasterLoop:
                     # Update best genome
                     status = self._gepa_engine.get_status()
                     self._metrics["loop1"] = status
+                    self._refresh_best_genome_from_loop1()
 
                     # Yield control briefly
                     await asyncio.sleep(1.0)
@@ -338,21 +351,29 @@ class MasterLoop:
                             )
                             logger.info("Loop 2: SFT complete — checkpoint at %s", checkpoint_path)
 
-                            # Export to Ollama (merge LoRA → GGUF → ollama create)
-                            try:
-                                ollama_name = await self._sft_launcher.export_to_ollama(
-                                    base_model_path=hf_model,
-                                    adapter_path=checkpoint_path,
-                                    ollama_model_name="tokagotchi:latest",
-                                    quantization="q4_k_m",
-                                )
-                                logger.info("Loop 2: Exported to Ollama as %s", ollama_name)
-                            except Exception:
-                                logger.exception("Loop 2: Ollama export failed (adapter still saved)")
+                            deployment_ts = time.strftime("%Y%m%d_%H%M%S")
+                            merged_path = str(
+                                Path(self.config.data_dir)
+                                / "checkpoints"
+                                / f"merged_{deployment_ts}"
+                            )
+                            deployed_tag = await self._sft_launcher.deploy_adapter(
+                                base_model_path=hf_model,
+                                adapter_path=checkpoint_path,
+                                tag=f"tokagotchi-loop2:{deployment_ts}",
+                                merged_output_path=merged_path,
+                            )
+                            self.config.model.name = deployed_tag
+                            self.vllm_server.config.name = deployed_tag
+                            self._metrics["serving_model"] = deployed_tag
+                            logger.info(
+                                "Loop 2: deployed merged checkpoint to Ollama tag %s",
+                                deployed_tag,
+                            )
 
                             # Commit results via git
                             if self.experiment_git:
-                                branch = await self.experiment_git.create_experiment_branch(
+                                await self.experiment_git.create_experiment_branch(
                                     "loop2", "sft_training",
                                 )
                                 await self.experiment_git.commit_results(
@@ -538,6 +559,7 @@ class MasterLoop:
                             arena_manager=self.arena_manager,
                             opus_client=self.opus_client,
                             curriculum_engine=self.curriculum,
+                            genome=self._best_genome,
                         )
 
                         self._metrics["loop3"] = result
@@ -584,18 +606,18 @@ class MasterLoop:
     # ------------------------------------------------------------------
 
     async def _run_eval(self) -> None:
-        """Run periodic evaluation against held-out benchmarks."""
+        """Run periodic evaluation against benchmark tasks."""
         assert self.eval_harness is not None
         self._loop_status["eval"] = "idle"
         logger.info("Periodic evaluation started")
 
         frequency_seconds = self.config.schedule.eval_frequency_minutes * 60
         data_dir = Path(self.config.data_dir)
-        benchmark_path = str(data_dir / "curriculum" / "seed_tasks.json")
         results_dir = data_dir / "eval_results"
         results_dir.mkdir(parents=True, exist_ok=True)
 
         previous_result: EvalResult | None = None
+        previous_benchmark_path: Path | None = None
 
         try:
             while not self._shutdown_event.is_set():
@@ -606,8 +628,28 @@ class MasterLoop:
 
                 try:
                     self._loop_status["eval"] = "running"
-                    tasks = self.eval_harness.load_benchmark_tasks(benchmark_path)
+                    benchmark_path, benchmark_source = self._resolve_benchmark_path()
+                    if benchmark_path is None:
+                        logger.warning(
+                            "Periodic evaluation skipped: no benchmark tasks available"
+                        )
+                        self._loop_status["eval"] = "idle"
+                        continue
+
+                    if previous_benchmark_path != benchmark_path:
+                        logger.info(
+                            "Periodic evaluation source: %s (%s)",
+                            benchmark_source,
+                            benchmark_path,
+                        )
+                        previous_result = None
+                        previous_benchmark_path = benchmark_path
+
+                    tasks = self.eval_harness.load_benchmark_tasks(str(benchmark_path))
+                    if benchmark_source == "seed_holdout_fallback":
+                        _, tasks = self._split_seed_holdout(tasks)
                     if not tasks or self._best_genome is None:
+                        self._loop_status["eval"] = "idle"
                         continue
 
                     result = await self.eval_harness.run_evaluation(
@@ -622,7 +664,11 @@ class MasterLoop:
                         results_dir / f"eval_{time.strftime('%Y%m%d_%H%M%S')}.json"
                     )
                     self.eval_harness.save_results(result, result_path)
-                    self._metrics["latest_eval"] = result.score_vector
+                    self._metrics["latest_eval"] = {
+                        **result.score_vector,
+                        "benchmark_path": str(benchmark_path),
+                        "benchmark_source": benchmark_source,
+                    }
 
                     # Regression check
                     if previous_result is not None:
@@ -650,6 +696,124 @@ class MasterLoop:
         finally:
             self._loop_status["eval"] = "stopped"
             logger.info("Periodic evaluation stopped")
+
+    def _refresh_best_genome_from_loop1(self) -> None:
+        """Refresh the cached best genome from Loop 1 state."""
+        updated = self._select_best_genome()
+        if updated is None:
+            return
+
+        changed = (
+            self._best_genome is None
+            or updated.genome_id != self._best_genome.genome_id
+            or updated.scores != self._best_genome.scores
+        )
+        self._best_genome = updated
+        if changed:
+            logger.info(
+                "Best genome refreshed from Loop 1: genome=%s success_rate=%.4f",
+                updated.genome_id,
+                updated.scores.get("success_rate", 0.0),
+            )
+
+    def _select_best_genome(self) -> PromptGenome | None:
+        """Select the best available genome from Loop 1 runtime or disk state."""
+        candidates: list[PromptGenome] = []
+
+        if self._gepa_engine is not None:
+            population = getattr(self._gepa_engine, "population", None)
+            if isinstance(population, list):
+                candidates.extend(
+                    g for g in population if isinstance(g, PromptGenome)
+                )
+
+        if not candidates:
+            pop_path = Path(self.config.data_dir) / "loop1_gepa" / "population.json"
+            if pop_path.exists():
+                try:
+                    candidates.extend(load_population(pop_path))
+                except Exception:
+                    logger.debug("Failed to reload Loop 1 population from disk", exc_info=True)
+
+        if not candidates:
+            return None
+
+        return max(candidates, key=lambda g: g.scores.get("success_rate", 0.0))
+
+    def _resolve_benchmark_path(self) -> tuple[Path | None, str]:
+        """Resolve the best available benchmark file for periodic evaluation."""
+        data_dir = Path(self.config.data_dir)
+
+        benchmark_roots = [
+            data_dir / "benchmarks",
+            Path("eval/benchmarks"),
+        ]
+        for root in benchmark_roots:
+            benchmark_file = self._find_task_file(root, allow_seed=False)
+            if benchmark_file is not None:
+                return benchmark_file, "benchmark"
+
+        seed_tasks = data_dir / "curriculum" / "seed_tasks.json"
+        if seed_tasks.exists():
+            return seed_tasks, "seed_holdout_fallback"
+
+        return None, "missing"
+
+    def _split_seed_holdout(
+        self,
+        tasks: list[TaskSpec],
+        eval_fraction: float = 0.2,
+    ) -> tuple[list[TaskSpec], list[TaskSpec]]:
+        """Split seed tasks into deterministic train/eval subsets."""
+        if len(tasks) <= 1:
+            return tasks, tasks
+
+        ordered = sorted(tasks, key=self._task_sort_key)
+        eval_count = max(1, int(round(len(ordered) * eval_fraction)))
+        eval_count = min(eval_count, len(ordered) - 1)
+        eval_tasks = ordered[-eval_count:]
+        eval_ids = {task.task_id for task in eval_tasks if task.task_id}
+        train_tasks = [
+            task for task in ordered if task.task_id not in eval_ids
+        ]
+
+        if not train_tasks:
+            train_tasks = ordered[:-1]
+            eval_tasks = ordered[-1:]
+
+        return train_tasks, eval_tasks
+
+    @staticmethod
+    def _task_sort_key(task: TaskSpec) -> str:
+        """Stable ordering key for deterministic task splits."""
+        raw = task.task_id or task.description
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _find_task_file(root: Path, *, allow_seed: bool) -> Path | None:
+        """Find a task file under a directory or validate a file path."""
+        if root.is_file():
+            if allow_seed:
+                return root
+            return None if "seed" in root.stem.lower() else root
+
+        if not root.is_dir():
+            return None
+
+        candidates: list[Path] = []
+        for pattern in ("*.json", "*.jsonl"):
+            candidates.extend(p for p in root.rglob(pattern) if p.is_file())
+
+        if not allow_seed:
+            candidates = [p for p in candidates if "seed" not in p.stem.lower()]
+
+        if not candidates:
+            return None
+
+        return sorted(
+            candidates,
+            key=lambda p: (-p.stat().st_mtime, p.name.lower()),
+        )[0]
 
     # ------------------------------------------------------------------
     # Status reporting
