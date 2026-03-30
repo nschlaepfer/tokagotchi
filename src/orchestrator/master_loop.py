@@ -220,6 +220,7 @@ class MasterLoop:
             config=cfg.loop2,
             persist_path=data_dir / "pending.jsonl",
         )
+        self._pending_buffer.load()  # Restore examples from previous runs
         self._sft_launcher = SFTLauncher(
             output_dir=data_dir / "checkpoints",
         )
