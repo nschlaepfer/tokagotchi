@@ -154,23 +154,28 @@ class SFTLauncher:
         )
 
         # 6. Create trainer and run
-        def _formatting_func(examples: dict[str, Any]) -> list[str]:
-            """Format chat messages into a single string for SFT."""
-            texts = []
-            for messages in examples["messages"]:
-                parts = []
-                for msg in messages:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")
-                    if role == "system":
-                        parts.append(f"<|system|>\n{content}")
-                    elif role == "user":
-                        parts.append(f"<|user|>\n{content}")
-                    elif role == "assistant":
-                        parts.append(f"<|assistant|>\n{content}")
-                parts.append("<|end|>")
-                texts.append("\n".join(parts))
-            return texts
+        def _formatting_func(example: dict[str, Any]) -> str:
+            """Format a single chat conversation into a string for SFT.
+
+            TRL 0.29+ calls this with batched=False, so example is a
+            single row: {"messages": [{"role": ..., "content": ...}, ...]}.
+            """
+            messages = example["messages"]
+            parts = []
+            for msg in messages:
+                if isinstance(msg, str):
+                    parts.append(msg)
+                    continue
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    parts.append(f"<|system|>\n{content}")
+                elif role == "user":
+                    parts.append(f"<|user|>\n{content}")
+                elif role == "assistant":
+                    parts.append(f"<|assistant|>\n{content}")
+            parts.append("<|end|>")
+            return "\n".join(parts)
 
         try:
             logger.info("Creating SFTTrainer...")
