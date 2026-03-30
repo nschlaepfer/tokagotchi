@@ -2,9 +2,10 @@
 
 ## bitsandbytes 4-bit Segfault on Qwen 3.5
 
-**Status**: Active workaround in place
+**Status**: RESOLVED via Unsloth
 **Affected**: QLoRA training (Loop 2 SFT, Loop 3 RL)
 **Date**: March 29, 2026
+**Resolution Date**: March 29, 2026
 
 ### Problem
 
@@ -20,25 +21,31 @@ Qwen 3.5 uses **Gated Delta Networks** (linear attention layers) which are not f
 
 triggers a segfault in `bitsandbytes.backends.cuda.ops` during the NF4 quantization of the Gated Delta Network weight matrices.
 
-### Workaround
+### Resolution: Unsloth
 
-Use BF16 loading instead of 4-bit quantization:
+**Unsloth's FastModel handles Qwen 3.5 natively on Windows** — no triton, no causal-conv1d, no segfaults. Install `pip install unsloth triton-windows`.
 
 ```python
-# CRASHES:
+# CRASHES (raw transformers + bitsandbytes):
 bnb_config = BitsAndBytesConfig(load_in_4bit=True)
 model = AutoModelForCausalLM.from_pretrained(path, quantization_config=bnb_config)
 
-# WORKS:
+# CRASHES (BF16 transformers — triton/fla dependency):
 model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, device_map="auto")
+
+# WORKS (Unsloth):
+from unsloth import FastModel
+model, processor = FastModel.from_pretrained(path, max_seq_length=2048, load_in_4bit=True)
+model = FastModel.get_peft_model(model, r=16, lora_alpha=16, target_modules=[...])
 ```
 
 ### VRAM Impact
 
 | Config | 9B Model | 27B Model | Training Headroom (32GB) |
 |--------|----------|-----------|--------------------------|
-| 4-bit | ~6 GB | ~16 GB | ~26 GB / ~16 GB |
-| BF16 | ~13 GB | ~54 GB (won't fit) | ~19 GB / N/A |
+| Unsloth 4-bit | **~8 GB** | ~22 GB | **~24 GB** / ~10 GB |
+| BF16 (crashes) | ~13 GB | ~54 GB (won't fit) | ~19 GB / N/A |
+| bnb 4-bit (crashes) | segfault | segfault | N/A |
 
 For the 9B model, BF16 uses ~13GB leaving ~19GB for LoRA + optimizer — sufficient for training on RTX 5090 32GB.
 

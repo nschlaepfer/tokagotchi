@@ -20,7 +20,7 @@ GEPA-style evolutionary optimization of prompts and context. No weight updates �
 
 2. **Opus trace surgery (fallback)**: When SDPO produces zero contrastive pairs (the model is "confidently wrong" even after seeing the error), Opus performs targeted correction. This concentrates expensive expert supervision on the model's blind spots.
 
-Corrections accumulate into a diversity-aware training buffer, then QLoRA fine-tuning bakes the lessons into weights. Based on [SCoRe](https://arxiv.org/abs/2504.01408), [SDPO](https://arxiv.org/abs/2601.20802), and [OPSD](https://arxiv.org/abs/2601.18734).
+Corrections accumulate into a diversity-aware training buffer, then **LoRA fine-tuning via Unsloth** bakes the lessons into weights. Based on [SCoRe](https://arxiv.org/abs/2504.01408), [SDPO](https://arxiv.org/abs/2601.20802), and [OPSD](https://arxiv.org/abs/2601.18734).
 
 ### Loop 3 — Reinforcement Learning (overnight)
 Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipping prevents entropy collapse. RAGEN's trajectory filtering catches echo traps. Quantization noise from fitting on 32GB actually helps exploration. Based on [Tree-GRPO](https://arxiv.org/abs/2504.07641), [QeRL](https://arxiv.org/abs/2502.15405), [DAPO](https://arxiv.org/abs/2503.14476), and [RAGEN](https://arxiv.org/abs/2504.11723).
@@ -36,12 +36,12 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
     ┌──────▼──────┐  ┌──────▼──────┐  ┌────▼────────┐
     │  Loop 1     │  │  Loop 2     │  │  Loop 3     │
     │  Prompt     │  │  SDPO +     │  │  Tree-GRPO  │
-    │  Evolution  │  │  Distill    │  │  RL         │
+    │  Evolution  │  │  Unsloth    │  │  RL         │
     └──────┬──────┘  └──────┬──────┘  └────┬────────┘
            │                │               │
     ┌──────▼────────────────▼───────────────▼─────────┐
     │  Qwen 3.5 9B (think=true) — RTX 5090 32GB      │
-    │  Ollama serving / QLoRA training                 │
+    │  Ollama serving / Unsloth LoRA training          │
     └──────────────────────┬──────────────────────────┘
                            │
     ┌──────────────────────▼──────────────────────────┐
@@ -53,11 +53,13 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 
 ## Key Technical Details
 
+- **Training via Unsloth**: Qwen 3.5's Gated Delta Networks require specialized CUDA kernels (triton, causal-conv1d) that don't work on Windows. [Unsloth](https://unsloth.ai) handles this natively — loads the model in 4-bit at 8GB VRAM, 1.5x faster training, 50% less memory. See `docs/KNOWN_ISSUES.md` for details.
 - **Thinking mode**: Qwen 3.5 abliterated requires `think=true` — the model cannot produce content without reasoning first. The system handles this natively.
 - **Action parser**: Robust multi-format parser handles Qwen's output patterns including `<think>` blocks, orphaned `</think>` tags, bracket-style `[action content]`, and reasoning text before actions.
-- **Sandbox backend**: Auto-detects Docker; falls back to subprocess sandboxes with a `python→python3` shim for Windows/Git Bash compatibility.
+- **Sandbox backend**: Auto-detects Docker; falls back to subprocess sandboxes with a `python->python3` shim for Windows/Git Bash compatibility.
 - **Mutation lineage**: Every genome stores its mutation type, Opus's diagnosis, rationale, and creation timestamp. Full mutation history logged to `mutation_log.jsonl`.
 - **Trajectory persistence**: Eval results save full step-by-step data (actions, observations, reasoning, rewards) for replay and analysis.
+- **Weights & Biases**: Real-time tracking of genome evals, SDPO pairs, training loss, budget, and pipeline status at [wandb.ai](https://wandb.ai).
 
 ## Requirements
 
@@ -66,6 +68,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 - **CLI**: Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
 - **Python**: 3.11+
 - **Model**: Pulled via Ollama (`ollama pull huihui_ai/qwen3.5-abliterated:9b`)
+- **Training**: `pip install unsloth triton-windows` (handles Qwen 3.5 on Windows)
 - **Storage**: ~20GB for model weights + ~5GB for data/checkpoints
 
 ## Quick Start
@@ -75,6 +78,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 git clone https://github.com/nschlaepfer/tokagotchi.git
 cd tokagotchi
 pip install -e .
+pip install unsloth triton-windows
 
 # Pull the model
 ollama pull huihui_ai/qwen3.5-abliterated:9b
@@ -94,14 +98,14 @@ tokagotchi/
 ├── src/
 │   ├── orchestrator/    # Opus client, budget tracker, master loop, git experiments
 │   ├── loop1_gepa/      # Prompt evolution: genome, mutations, Pareto frontier
-│   ├── loop2_distill/   # SDPO + distillation: trace surgery, SFT, mentor sessions
+│   ├── loop2_distill/   # SDPO + Unsloth SFT: trace surgery, training, mentor sessions
 │   ├── loop3_rl/        # RL: Tree-GRPO, DAPO clipping, trajectory filtering
 │   ├── arena/           # Subprocess sandboxes + tools (bash, python, SQL, APIs)
 │   ├── curriculum/      # Self-Evolving Curriculum, task generation, frontier probing
 │   ├── rewards/         # Outcome, process (Opus-judged), efficiency, composite
-│   └── infra/           # Ollama server wrapper, VRAM scheduler, eval harness
+│   └── infra/           # Ollama server, VRAM scheduler, eval harness, wandb tracker
 ├── paper/               # DGHD paper (LaTeX)
-├── docs/                # Reference papers (PDFs)
+├── docs/                # Reference papers (PDFs) + KNOWN_ISSUES.md
 ├── data/                # Seed prompts, seed tasks, generated data, checkpoints
 ├── scripts/             # CLI entry points + setup
 └── eval/                # Benchmarks + regression suite
@@ -134,6 +138,7 @@ This project introduces **Divergence-Gated Hierarchical Distillation (DGHD)** �
 | Loop 1 mutations (Opus) | ~$0.03/call, 50/hr | ~$3-5 |
 | Loop 2 SDPO (local) | $0 | $0 |
 | Loop 2 Opus fallback | ~$0.03-0.05/call, as needed | ~$2-5 |
+| Loop 2 training (local, Unsloth) | $0 | $0 |
 | Loop 3 RL (local) | $0 (overnight) | $0 |
 | **Total** | | **~$5-10/day** |
 
@@ -142,10 +147,10 @@ SDPO reduces Loop 2 costs by an estimated 70-80% by handling most failures local
 ## VRAM Management
 
 The single GPU serves double duty:
-- **Serving phase** (~8GB for 9B, ~17GB for 27B): Ollama runs Qwen for inference during Loops 1-2
-- **Training phase** (32GB): Ollama stops, full GPU for QLoRA/GRPO
+- **Serving phase** (~8-20GB): Ollama runs Qwen for inference during Loops 1-2
+- **Training phase** (~8GB via Unsloth 4-bit): Ollama stops, Unsloth loads model for LoRA training
 
-Phase transitions are automatic — the VRAM scheduler handles the lifecycle.
+Phase transitions are automatic — the VRAM scheduler stops Ollama (with retry + nvidia-smi verification), runs training, then restarts serving.
 
 ## Scaling to 27B
 
@@ -153,7 +158,7 @@ The 9B model is the proof of concept. To scale up:
 1. Download: `huggingface-cli download huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated`
 2. Pull: `ollama pull huihui_ai/qwen3.5-abliterated:27b`
 3. Change `model.name` in `config/master.yaml`
-4. Everything else (GEPA, SDPO, QLoRA, RL) just works on the bigger model
+4. Everything else (GEPA, SDPO, Unsloth training, RL) just works on the bigger model
 
 Optional: Build [Madreag's TurboQuant fork](https://github.com/Madreag/turbo3-cuda) for 4.6x KV cache compression on the RTX 5090 — enables 262K+ context for the 27B model.
 
