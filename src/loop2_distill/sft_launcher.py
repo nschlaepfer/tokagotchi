@@ -192,8 +192,90 @@ class SFTLauncher:
 
         return adapter_output
 
+    async def export_to_ollama(
+        self,
+        base_model_path: str,
+        adapter_path: str,
+        ollama_model_name: str = "tokagotchi:latest",
+        quantization: str = "q4_k_m",
+    ) -> str:
+        """Merge LoRA adapter, convert to GGUF, and import into Ollama.
+
+        Uses Unsloth's save_pretrained_gguf which handles the full
+        pipeline: merge adapter → convert to GGUF → create Modelfile.
+        Then runs ``ollama create`` to register the model.
+
+        Parameters
+        ----------
+        base_model_path:
+            Path to the base HF model.
+        adapter_path:
+            Path to the saved LoRA adapter directory.
+        ollama_model_name:
+            Name for the Ollama model (e.g. "tokagotchi:latest").
+        quantization:
+            GGUF quantization method (q4_k_m, q8_0, f16).
+
+        Returns
+        -------
+        str
+            The Ollama model name that was created.
+        """
+        import torch
+        from unsloth import FastModel
+
+        gguf_dir = str(self.output_dir / "gguf_export")
+
+        logger.info(
+            "Exporting to Ollama: adapter=%s, quant=%s, name=%s",
+            adapter_path, quantization, ollama_model_name,
+        )
+
+        loop = asyncio.get_event_loop()
+
+        def _export() -> None:
+            # Load base model + adapter via Unsloth
+            model, processor = FastModel.from_pretrained(
+                model_name=adapter_path,  # Unsloth loads adapter from saved dir
+                max_seq_length=2048,
+                load_in_4bit=True,
+            )
+            tokenizer = (
+                processor.tokenizer if hasattr(processor, "tokenizer") else processor
+            )
+
+            # Save as GGUF (merges LoRA + converts + creates Modelfile)
+            model.save_pretrained_gguf(
+                gguf_dir,
+                tokenizer,
+                quantization_method=quantization,
+            )
+            logger.info("GGUF export complete: %s", gguf_dir)
+
+        await loop.run_in_executor(None, _export)
+
+        # Import into Ollama via CLI
+        modelfile_path = Path(gguf_dir) / "Modelfile"
+        if modelfile_path.exists():
+            import subprocess
+            result = subprocess.run(
+                ["ollama", "create", ollama_model_name, "-f", str(modelfile_path)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=gguf_dir,
+            )
+            if result.returncode == 0:
+                logger.info("Ollama model created: %s", ollama_model_name)
+            else:
+                logger.error("ollama create failed: %s", result.stderr)
+        else:
+            logger.warning("No Modelfile found at %s — skipping Ollama import", modelfile_path)
+
+        return ollama_model_name
+
     # ------------------------------------------------------------------
-    # Adapter merging
+    # Adapter merging (legacy — use export_to_ollama instead)
     # ------------------------------------------------------------------
 
     async def merge_adapter(

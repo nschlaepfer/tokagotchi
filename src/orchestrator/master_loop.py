@@ -338,6 +338,18 @@ class MasterLoop:
                             )
                             logger.info("Loop 2: SFT complete — checkpoint at %s", checkpoint_path)
 
+                            # Export to Ollama (merge LoRA → GGUF → ollama create)
+                            try:
+                                ollama_name = await self._sft_launcher.export_to_ollama(
+                                    base_model_path=hf_model,
+                                    adapter_path=checkpoint_path,
+                                    ollama_model_name="tokagotchi:latest",
+                                    quantization="q4_k_m",
+                                )
+                                logger.info("Loop 2: Exported to Ollama as %s", ollama_name)
+                            except Exception:
+                                logger.exception("Loop 2: Ollama export failed (adapter still saved)")
+
                             # Commit results via git
                             if self.experiment_git:
                                 branch = await self.experiment_git.create_experiment_branch(
