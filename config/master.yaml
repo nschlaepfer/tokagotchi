@@ -1,14 +1,16 @@
 model:
-  name: "huihui_ai/qwen3.5-abliterated:9b"
+  name: "tokagotchi:latest"
   quantization: ""
   ollama_port: 11434
   ollama_host: "localhost"
 
 opus:
+  provider: "claude"
   daily_budget_usd: 9999.0
   hourly_budget_usd: 9999.0
   session_dir: "./data/opus_sessions"
   model: "claude-opus-4-6"
+  model_reasoning_effort: "xhigh"
   default_max_turns: 10
   default_max_budget_per_call_usd: 0.50
 
