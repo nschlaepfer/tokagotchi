@@ -111,6 +111,18 @@ class PendingBuffer:
         with self._lock:
             return len(self._examples)
 
+    def sample(self, n: int) -> list[dict[str, Any]]:
+        """Return a random sample of n examples with metadata, without modifying the buffer."""
+        import random
+        with self._lock:
+            if not self._examples:
+                return []
+            indices = random.sample(range(len(self._examples)), min(n, len(self._examples)))
+            return [
+                {"example": self._examples[i], "metadata": self._metadata[i], "index": i}
+                for i in indices
+            ]
+
     def is_ready(self) -> bool:
         """Check whether the buffer is ready for a training run.
 

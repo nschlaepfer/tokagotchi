@@ -270,3 +270,163 @@ class CodexBridge:
         except Exception:
             logger.exception("Codex review failed")
             return None
+
+    # ------------------------------------------------------------------
+    # Domain-specific gates (Meta-Harness trace-aware)
+    # ------------------------------------------------------------------
+
+    async def review_training_data(
+        self,
+        examples_sample: list[dict[str, Any]],
+        buffer_stats: dict[str, Any],
+        trace_context: str = "",
+    ) -> str | None:
+        """Review training data quality before SFT. Non-blocking."""
+        prompt = (
+            "You are reviewing training data for a self-improving coding agent (Qwen 3.5 9B).\n\n"
+            f"## Buffer Stats\n{json.dumps(buffer_stats, indent=2, default=str)}\n\n"
+            f"## Sample Examples ({len(examples_sample)} of buffer)\n"
+        )
+        for i, ex in enumerate(examples_sample[:10]):
+            meta = ex.get("metadata", {})
+            msgs = ex.get("example", {}).get("messages", [])
+            prompt += f"\n### Example {i+1} (type={meta.get('task_type','?')}, source={meta.get('source','?')})\n"
+            for m in msgs[-3:]:  # Last 3 messages only
+                role = m.get("role", "?")
+                content = str(m.get("content", ""))[:200]
+                prompt += f"  [{role}]: {content}...\n"
+        if trace_context:
+            prompt += f"\n## Recent Training History\n{trace_context}\n"
+        prompt += (
+            "\n## Task\n"
+            "Rate each example 1-5 (5=high quality). Flag any with:\n"
+            "- Obviously wrong corrections\n"
+            "- Truncated or incomplete traces\n"
+            "- Degenerate patterns (repeated actions, empty observations)\n"
+            "- Task-specific memorization (won't generalize)\n"
+            "Return JSON: {flagged_indices: int[], quality_summary: str, avg_score: float}\n"
+        )
+        result = await self.spawn_task(prompt, background=True)
+        self._log_review("training_data", {"stats": buffer_stats, "n_samples": len(examples_sample)})
+        return result
+
+    async def generate_curriculum(
+        self,
+        capability_profile: dict[str, Any],
+        failure_patterns: dict[str, int],
+        trace_context: str = "",
+        n_tasks: int = 5,
+    ) -> str | None:
+        """Generate new curriculum tasks targeting weak areas. Non-blocking."""
+        prompt = (
+            "You are a curriculum designer for a self-improving coding agent.\n\n"
+            f"## Current Capability Profile\n{json.dumps(capability_profile, indent=2, default=str)}\n\n"
+            f"## Recent Failure Patterns\n{json.dumps(failure_patterns, indent=2, default=str)}\n\n"
+        )
+        if trace_context:
+            prompt += f"## Historical Trace Context\n{trace_context}\n\n"
+        prompt += (
+            f"## Task\n"
+            f"Generate {n_tasks} new coding tasks that:\n"
+            "1. Target weak areas (success rate < 50%)\n"
+            "2. Stay in the 0.3-0.7 difficulty band (learnable, not impossible)\n"
+            "3. Bridge from strong areas to weak ones gradually\n"
+            "4. Include diverse task types\n\n"
+            "Return JSON array of tasks, each with:\n"
+            '{"task_id": "gen_xxx", "task_type": "code_debugging|api_orchestration|info_gathering|open_ended_optimization",\n'
+            ' "description": "...", "initial_files": {"filename": "content"}, "test_commands": ["..."],\n'
+            ' "expected_output": "..." or null, "difficulty": 0.3-0.7}\n'
+        )
+        result = await self.spawn_task(prompt, background=True)
+        self._log_review("curriculum_gen", {"profile": capability_profile, "n_requested": n_tasks})
+        return result
+
+    async def diagnose_failures(
+        self,
+        failure_trajectories: list[dict[str, Any]],
+        failure_patterns: dict[str, int],
+        genome_summary: dict[str, Any],
+        trace_context: str = "",
+    ) -> str | None:
+        """Analyze failure patterns to produce compressed diagnostics for Opus. Non-blocking."""
+        prompt = (
+            "You are diagnosing failures in a coding agent's evaluation runs.\n\n"
+            f"## Failure Pattern Distribution\n{json.dumps(failure_patterns, indent=2, default=str)}\n\n"
+            f"## Current Genome Summary\n{json.dumps(genome_summary, indent=2, default=str)}\n\n"
+            f"## Failed Trajectory Summaries ({len(failure_trajectories)} trajectories)\n"
+        )
+        for i, traj in enumerate(failure_trajectories[:10]):
+            prompt += f"\n### Trajectory {i+1}: {traj.get('task_desc', '?')[:150]}\n"
+            prompt += f"  Steps: {traj.get('num_steps', '?')}, Actions: {traj.get('actions_used', [])}\n"
+            for step in traj.get("last_steps", [])[-3:]:
+                prompt += f"  [{step.get('action','')}] {str(step.get('content',''))[:80]} -> {str(step.get('obs',''))[:80]}\n"
+        if trace_context:
+            prompt += f"\n## Historical Context\n{trace_context}\n"
+        prompt += (
+            "\n## Task\n"
+            "Produce a structured diagnosis:\n"
+            "1. Top 3 root causes (with evidence from trajectories)\n"
+            "2. For each: recommended mutation type (add_example, modify_tool_instructions, strengthen_instruction, add_cot_step, add_error_recovery)\n"
+            "3. One-paragraph genome weakness summary\n"
+            "Return JSON: {root_causes: [{cause, evidence, mutation_type, priority}], genome_weakness: str}\n"
+        )
+        result = await self.spawn_task(prompt, background=True)
+        self._log_review("failure_diagnosis", {"n_trajectories": len(failure_trajectories), "patterns": failure_patterns})
+        return result
+
+    async def review_mutation(
+        self,
+        original_genome: dict[str, Any],
+        mutated_genome: dict[str, Any],
+        mutation_metadata: dict[str, Any],
+        trace_context: str = "",
+    ) -> str | None:
+        """Review a proposed prompt mutation for obvious regressions. Non-blocking."""
+        # Compute diffs for the prompt
+        diffs = {}
+        for key in ["system_prompt", "few_shot_examples", "tool_instructions", "error_recovery_hints"]:
+            orig = str(original_genome.get(key, ""))[:500]
+            mut = str(mutated_genome.get(key, ""))[:500]
+            if orig != mut:
+                diffs[key] = {"before": orig, "after": mut}
+
+        if not diffs:
+            return None  # No changes to review
+
+        prompt = (
+            "You are reviewing a prompt mutation for a coding agent.\n\n"
+            f"## Mutation Type: {mutation_metadata.get('mutation_type', '?')}\n"
+            f"## Diagnosis: {str(mutation_metadata.get('diagnosis', ''))[:300]}\n"
+            f"## Rationale: {str(mutation_metadata.get('rationale', ''))[:300]}\n\n"
+            f"## Changes\n{json.dumps(diffs, indent=2, default=str)}\n\n"
+        )
+        if trace_context:
+            prompt += f"## Historical Context\n{trace_context}\n\n"
+        prompt += (
+            "## Task\n"
+            "Assess this mutation:\n"
+            "1. Does it address the diagnosed failure?\n"
+            "2. Are there obvious regressions (removing critical instructions, contradictions)?\n"
+            "3. Is the system prompt coherent after the change?\n"
+            "Return JSON: {verdict: 'approve'|'flag'|'reject', issues: str[], confidence: float}\n"
+        )
+        result = await self.spawn_task(prompt, background=True)
+        self._log_review("mutation_review", {"type": mutation_metadata.get("mutation_type"), "fields_changed": list(diffs.keys())})
+        return result
+
+    # ------------------------------------------------------------------
+    # Review logging
+    # ------------------------------------------------------------------
+
+    def _log_review(self, category: str, data: dict[str, Any]) -> None:
+        """Persist a Codex review record to disk for auditability."""
+        try:
+            review_dir = Path(self.cwd) / "data" / "codex_reviews"
+            review_dir.mkdir(parents=True, exist_ok=True)
+            path = review_dir / f"{category}_{time.strftime('%Y%m%d_%H%M%S')}.json"
+            path.write_text(json.dumps(
+                {"category": category, "timestamp": time.time(), **data},
+                indent=2, default=str,
+            ))
+        except Exception:
+            logger.debug("Failed to log Codex review", exc_info=True)

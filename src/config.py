@@ -147,6 +147,21 @@ class RewardWeights:
 
 
 @dataclass
+class CodexConfig:
+    """Configuration for Codex (GPT-5.4) integration gates."""
+    enabled: bool = True
+    # Individual gate toggles
+    training_data_review: bool = True
+    curriculum_generation: bool = True
+    failure_diagnostics: bool = True
+    mutation_review: bool = True
+    # Sampling parameters
+    training_review_sample_size: int = 20
+    curriculum_batch_size: int = 5
+    curriculum_stagnation_gens: int = 5
+
+
+@dataclass
 class MasterConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     opus: OpusConfig = field(default_factory=OpusConfig)
@@ -157,6 +172,7 @@ class MasterConfig:
     loop3: Loop3Config = field(default_factory=Loop3Config)
     arena: ArenaConfig = field(default_factory=ArenaConfig)
     reward_weights: RewardWeights = field(default_factory=RewardWeights)
+    codex: CodexConfig = field(default_factory=CodexConfig)
     data_dir: str = "./data"
 
 

@@ -87,6 +87,19 @@ class MasterLoop:
         except Exception:
             pass
 
+        # Meta-Harness trace store (filesystem-based diagnostic history)
+        self._trace_store: Any | None = None
+        try:
+            from src.infra.trace_store import TraceStore
+            self._trace_store = TraceStore(base_dir=Path(config.data_dir) / "traces")
+        except Exception:
+            pass
+
+        # Stagnation tracking for curriculum generation
+        self._stagnation_count: int = 0
+        self._last_best_score: float = 0.0
+        self._pending_curriculum_job: str | None = None
+
         # Loop-specific engines
         self._gepa_engine: GEPAEngine | None = None
         self._trace_collector: TraceCollector | None = None
@@ -341,6 +354,9 @@ class MasterLoop:
                         logger.info("Loop 2: buffer ready — triggering SFT")
                         self._loop_status["loop2_distill"] = "training"
 
+                        # Codex training data review (non-blocking)
+                        await self._codex_review_training_data()
+
                         # Drain training examples from the buffer
                         training_data = self._pending_buffer.get_training_batch()
 
@@ -458,6 +474,65 @@ class MasterLoop:
                 logger.info("Codex diagnosis spawned: %s", job_id)
         except Exception:
             logger.debug("Codex diagnosis failed (non-fatal)", exc_info=True)
+
+    async def _codex_review_training_data(self) -> None:
+        """Request Codex review of pending training data (fire-and-forget)."""
+        if self._codex is None or not self.config.codex.enabled:
+            return
+        if not self.config.codex.training_data_review:
+            return
+        try:
+            sample = self._pending_buffer.sample(self.config.codex.training_review_sample_size)
+            if not sample:
+                return
+            stats = self._pending_buffer.get_stats()
+            trace_ctx = ""
+            if self._trace_store:
+                trace_ctx = self._trace_store.get_failure_summary(last_n_gens=3)
+            job_id = await self._codex.review_training_data(sample, stats, trace_context=trace_ctx)
+            if job_id:
+                logger.info("Codex training data review spawned: %s", job_id)
+        except Exception:
+            logger.debug("Codex training data review failed (non-fatal)", exc_info=True)
+
+    async def _check_stagnation_and_generate_curriculum(self) -> None:
+        """If frontier hasn't improved, ask Codex to generate curriculum tasks."""
+        if self._codex is None or self.curriculum is None:
+            return
+        if not self.config.codex.enabled or not self.config.codex.curriculum_generation:
+            return
+
+        # Get current best score
+        current_best = 0.0
+        if self._best_genome and hasattr(self._best_genome, "scores") and self._best_genome.scores:
+            current_best = self._best_genome.scores.get("success_rate", 0.0)
+
+        if abs(current_best - self._last_best_score) < 0.01:
+            self._stagnation_count += 1
+        else:
+            self._stagnation_count = 0
+        self._last_best_score = current_best
+
+        if self._stagnation_count >= self.config.codex.curriculum_stagnation_gens:
+            try:
+                profile = self.curriculum.get_capability_profile()
+                trace_ctx = ""
+                if self._trace_store:
+                    trace_ctx = self._trace_store.get_failure_summary(last_n_gens=5)
+                job_id = await self._codex.generate_curriculum(
+                    profile,
+                    {},  # failure patterns from trace store
+                    trace_context=trace_ctx,
+                    n_tasks=self.config.codex.curriculum_batch_size,
+                )
+                if job_id:
+                    logger.info(
+                        "Codex curriculum generation spawned (stagnation=%d): %s",
+                        self._stagnation_count, job_id,
+                    )
+                    self._stagnation_count = 0  # Reset after trigger
+            except Exception:
+                logger.debug("Codex curriculum generation failed (non-fatal)", exc_info=True)
 
     async def _collect_traces_for_buffer(self) -> None:
         """Collect rollout traces and feed corrected versions into the buffer."""
