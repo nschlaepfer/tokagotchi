@@ -34,7 +34,7 @@ class VRAMScheduler:
         *,
         vram_free_wait: float = 5.0,
         vram_free_timeout: float = 60.0,
-        vram_free_target_mb: int = 30_000,
+        vram_free_target_mb: int = 26_000,
     ) -> None:
         self._server = server
         self._phase: Phase = Phase.TRAINING  # nothing running initially

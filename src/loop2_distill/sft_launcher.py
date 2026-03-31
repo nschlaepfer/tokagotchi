@@ -73,7 +73,10 @@ class SFTLauncher:
         str
             Path to the saved LoRA adapter directory.
         """
-        # Lazy imports
+        # Lazy imports — fix tqdm stderr crash on Windows background processes
+        import io, os, sys
+        if not hasattr(sys.stderr, 'fileno') or not sys.stderr.isatty():
+            os.environ["TQDM_DISABLE"] = "1"
         import torch
         from datasets import Dataset
         from unsloth import FastModel
@@ -195,6 +198,75 @@ class SFTLauncher:
 
         return adapter_output
 
+    async def train_and_export(
+        self,
+        training_data: list[dict[str, Any]],
+        config: Loop2Config,
+        base_model_path: str,
+        ollama_model_name: str = "tokagotchi:latest",
+        quantization: str = "q4_k_m",
+    ) -> tuple[str, str | None]:
+        """Train LoRA, then export to GGUF+Ollama using the already-loaded model.
+
+        This avoids reloading the model for export (saves ~18GB RAM).
+
+        Returns (adapter_path, ollama_model_name or None on export failure).
+        """
+        adapter_path, model, tokenizer = await self.launch_training(
+            training_data, config, base_model_path,
+        )
+
+        # Export GGUF while model+LoRA are still in memory
+        gguf_dir = str(self.output_dir / "gguf_export")
+        Path(gguf_dir).mkdir(parents=True, exist_ok=True)
+        ollama_name: str | None = None
+
+        loop = asyncio.get_event_loop()
+        try:
+            logger.info(
+                "Exporting GGUF (in-memory): quant=%s, dest=%s",
+                quantization, gguf_dir,
+            )
+
+            def _save_gguf() -> None:
+                model.save_pretrained_gguf(
+                    gguf_dir,
+                    tokenizer,
+                    quantization_method=quantization,
+                )
+
+            await loop.run_in_executor(None, _save_gguf)
+            logger.info("GGUF export complete: %s", gguf_dir)
+
+            # Import into Ollama
+            modelfile_path = Path(gguf_dir) / "Modelfile"
+            if modelfile_path.exists():
+                proc = await asyncio.create_subprocess_exec(
+                    "ollama", "create", ollama_model_name,
+                    "-f", str(modelfile_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=gguf_dir,
+                )
+                out, _ = await proc.communicate()
+                if proc.returncode == 0:
+                    logger.info("Ollama model created: %s", ollama_model_name)
+                    ollama_name = ollama_model_name
+                else:
+                    logger.error(
+                        "ollama create failed: %s",
+                        out.decode(errors="replace"),
+                    )
+            else:
+                logger.warning("No Modelfile at %s", modelfile_path)
+        except Exception:
+            logger.exception("GGUF export failed (adapter still saved at %s)", adapter_path)
+        finally:
+            del model, tokenizer
+            _free_gpu_memory()
+
+        return adapter_path, ollama_name
+
     async def export_to_ollama(
         self,
         base_model_path: str,
@@ -204,10 +276,9 @@ class SFTLauncher:
     ) -> str:
         """Merge LoRA adapter, convert to GGUF, and import into Ollama.
 
-        Loads the *base* model first via Unsloth, then applies the LoRA
-        adapter from ``adapter_path`` using PEFT, and finally calls
-        ``save_pretrained_gguf`` which handles: merge → GGUF convert →
-        Modelfile creation.  Then runs ``ollama create`` to register.
+        Runs the export in a **separate Python subprocess** via
+        ``scripts/export_gguf.py`` so the parent process's VRAM is
+        fully free — no double-load OOM.
 
         Parameters
         ----------
@@ -225,67 +296,41 @@ class SFTLauncher:
         str
             The Ollama model name that was created.
         """
-        import torch
-        from unsloth import FastModel
+        import sys
 
-        gguf_dir = str(self.output_dir / "gguf_export")
+        # Locate the export script relative to the project root
+        project_root = Path(__file__).resolve().parent.parent.parent
+        export_script = project_root / "scripts" / "export_gguf.py"
+        if not export_script.exists():
+            raise FileNotFoundError(f"Export script not found: {export_script}")
+
+        # Use C: drive for the merged safetensors — E: is too full with pagefile
+        output_dir = "C:/temp/tokagotchi_export"
 
         logger.info(
-            "Exporting to Ollama: adapter=%s, quant=%s, name=%s",
+            "Exporting to Ollama (subprocess): adapter=%s, quant=%s, tag=%s",
             adapter_path, quantization, ollama_model_name,
         )
 
-        loop = asyncio.get_event_loop()
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(export_script),
+            "--base-model", str(Path(base_model_path).resolve()),
+            "--adapter", str(Path(adapter_path).resolve()),
+            "--output-dir", output_dir,
+            "--quantization", quantization,
+            "--ollama-tag", ollama_model_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(project_root),
+        )
+        stdout, _ = await proc.communicate()
+        output = stdout.decode(errors="replace")
 
-        def _export() -> None:
-            try:
-                # Load the BASE model via Unsloth (not the adapter dir)
-                model, processor = FastModel.from_pretrained(
-                    model_name=base_model_path,
-                    max_seq_length=2048,
-                    load_in_4bit=True,
-                )
-                tokenizer = (
-                    processor.tokenizer
-                    if hasattr(processor, "tokenizer")
-                    else processor
-                )
-
-                # Apply the saved LoRA adapter on top
-                from peft import PeftModel
-                model = PeftModel.from_pretrained(model, adapter_path)
-                logger.info("LoRA adapter applied from %s", adapter_path)
-
-                # Save as GGUF (merges LoRA + converts + creates Modelfile)
-                model.save_pretrained_gguf(
-                    gguf_dir,
-                    tokenizer,
-                    quantization_method=quantization,
-                )
-                logger.info("GGUF export complete: %s", gguf_dir)
-            finally:
-                # Always free GPU memory so Ollama can load the model
-                _free_gpu_memory()
-
-        await loop.run_in_executor(None, _export)
-
-        # Import into Ollama via CLI
-        modelfile_path = Path(gguf_dir) / "Modelfile"
-        if modelfile_path.exists():
-            import subprocess
-            result = subprocess.run(
-                ["ollama", "create", ollama_model_name, "-f", str(modelfile_path)],
-                capture_output=True,
-                text=True,
-                timeout=300,
-                cwd=gguf_dir,
-            )
-            if result.returncode == 0:
-                logger.info("Ollama model created: %s", ollama_model_name)
-            else:
-                logger.error("ollama create failed: %s", result.stderr)
+        if "EXPORT_OK" in output:
+            logger.info("GGUF export + Ollama import complete: %s", ollama_model_name)
         else:
-            logger.warning("No Modelfile found at %s — skipping Ollama import", modelfile_path)
+            logger.error("Export subprocess failed (exit %d):\n%s", proc.returncode, output[-2000:])
+            raise RuntimeError("GGUF export subprocess failed")
 
         return ollama_model_name
 

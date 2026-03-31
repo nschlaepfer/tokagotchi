@@ -79,6 +79,14 @@ class MasterLoop:
         self.experiment_git: ExperimentGit | None = None
         self.eval_harness: EvalHarness | None = None
 
+        # Codex bridge for offloading diagnosis/review to GPT-5.4
+        self._codex: Any | None = None
+        try:
+            from src.infra.codex_bridge import CodexBridge
+            self._codex = CodexBridge(cwd=Path(config.data_dir).parent)
+        except Exception:
+            pass
+
         # Loop-specific engines
         self._gepa_engine: GEPAEngine | None = None
         self._trace_collector: TraceCollector | None = None
@@ -349,30 +357,35 @@ class MasterLoop:
                                 config=self.config.loop2,
                                 base_model_path=hf_model,
                             )
-                            logger.info("Loop 2: SFT complete — checkpoint at %s", checkpoint_path)
+                            logger.info("Loop 2: SFT complete — adapter at %s", checkpoint_path)
+                        finally:
+                            # Free any leftover PyTorch GPU memory before export/serving
+                            self._free_training_vram()
 
-                            deployment_ts = time.strftime("%Y%m%d_%H%M%S")
-                            merged_path = str(
-                                Path(self.config.data_dir)
-                                / "checkpoints"
-                                / f"merged_{deployment_ts}"
-                            )
-                            deployed_tag = await self._sft_launcher.deploy_adapter(
+                        # Export to Ollama in a SEPARATE subprocess (clean VRAM)
+                        try:
+                            ollama_name = await self._sft_launcher.export_to_ollama(
                                 base_model_path=hf_model,
                                 adapter_path=checkpoint_path,
-                                tag=f"tokagotchi-loop2:{deployment_ts}",
-                                merged_output_path=merged_path,
+                                ollama_model_name="tokagotchi:latest",
+                                quantization="q4_k_m",
                             )
-                            self.config.model.name = deployed_tag
-                            self.vllm_server.config.name = deployed_tag
-                            self._metrics["serving_model"] = deployed_tag
-                            logger.info(
-                                "Loop 2: deployed merged checkpoint to Ollama tag %s",
-                                deployed_tag,
+                            self.config.model.name = ollama_name
+                            self.vllm_server.config.name = ollama_name
+                            self._metrics["serving_model"] = ollama_name
+                            logger.info("Loop 2: Serving updated model %s", ollama_name)
+                        except Exception:
+                            logger.exception("Loop 2: Export failed — adapter saved at %s", checkpoint_path)
+                            # Delegate diagnosis to Codex if available
+                            await self._codex_diagnose(
+                                f"GGUF export failed after SFT training. "
+                                f"Adapter at {checkpoint_path}, base model at {hf_model}. "
+                                f"Check the latest log for the traceback and diagnose the root cause."
                             )
 
-                            # Commit results via git
-                            if self.experiment_git:
+                        # Commit results via git
+                        if self.experiment_git:
+                            try:
                                 await self.experiment_git.create_experiment_branch(
                                     "loop2", "sft_training",
                                 )
@@ -380,11 +393,11 @@ class MasterLoop:
                                     [checkpoint_path],
                                     f"Loop 2 SFT: {len(training_data)} examples",
                                 )
-                        finally:
-                            # Free any leftover PyTorch GPU memory before Ollama restarts
-                            self._free_training_vram()
-                            # Return to serving phase
-                            await self.vram_scheduler.enter_serving_phase()
+                            except Exception:
+                                logger.debug("Git commit failed (non-fatal)", exc_info=True)
+
+                        # Return to serving phase (Ollama restart if needed)
+                        await self.vram_scheduler.enter_serving_phase()
 
                         self._loop_status["loop2_distill"] = "monitoring"
                     else:
@@ -426,6 +439,25 @@ class MasterLoop:
                 logger.info("GPU memory freed before serving: %.0f MiB available", free_mb)
         except Exception as e:
             logger.warning("Failed to free GPU memory: %s", e)
+
+    async def _codex_diagnose(self, context: str) -> None:
+        """Fire-and-forget: ask Codex to diagnose a pipeline failure."""
+        if self._codex is None:
+            return
+        try:
+            log_path = None
+            logs_dir = Path(self.config.data_dir) / "logs"
+            if logs_dir.exists():
+                logs = sorted(logs_dir.glob("run_*.log"), key=lambda p: p.stat().st_mtime)
+                if logs:
+                    log_path = str(logs[-1])
+            job_id = await self._codex.diagnose(
+                context, log_path=log_path, background=True,
+            )
+            if job_id:
+                logger.info("Codex diagnosis spawned: %s", job_id)
+        except Exception:
+            logger.debug("Codex diagnosis failed (non-fatal)", exc_info=True)
 
     async def _collect_traces_for_buffer(self) -> None:
         """Collect rollout traces and feed corrected versions into the buffer."""
@@ -581,6 +613,10 @@ class MasterLoop:
                 except Exception:
                     logger.exception("Loop 3 error")
                     self._loop_status["loop3_rl"] = "error"
+                    await self._codex_diagnose(
+                        "Loop 3 RL training crashed. Check the latest log for the traceback. "
+                        "Diagnose root cause and suggest whether to retry or skip this cycle."
+                    )
                     await asyncio.sleep(600)
                     self._loop_status["loop3_rl"] = "waiting"
 
@@ -681,6 +717,11 @@ class MasterLoop:
                                 "Regression detected: %s", details
                             )
                             self._metrics["regression"] = details
+                            await self._codex_diagnose(
+                                f"Eval regression detected. Details: {details}. "
+                                f"Investigate what changed between training cycles and "
+                                f"whether the latest adapter should be rolled back."
+                            )
                         else:
                             logger.info("Eval passed regression check")
 

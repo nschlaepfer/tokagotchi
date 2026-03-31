@@ -89,7 +89,14 @@ class LLMServer:
             await self._ensure_model_available()
 
             # 3. Warm up the model by loading it into GPU memory
-            await self._warmup_model()
+            try:
+                await self._warmup_model()
+            except Exception:
+                # Ollama runners can get corrupted after training kills.
+                # Restart the service and retry once.
+                logger.warning("Warmup failed — restarting Ollama service and retrying")
+                await self._restart_ollama_service()
+                await self._warmup_model()
 
             # 4. Create OpenAI-compatible client
             self._client = openai.AsyncOpenAI(
@@ -289,6 +296,31 @@ class LLMServer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _restart_ollama_service(self) -> None:
+        """Kill and restart the Ollama service to clear corrupted runner state."""
+        logger.info("Restarting Ollama service ...")
+        # Kill all ollama processes
+        if sys.platform == "win32":
+            for name in ("ollama.exe", "ollama app.exe"):
+                proc = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/IM", name,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                "pkill", "-f", "ollama",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+
+        await asyncio.sleep(3)
+        # Restart via _ensure_ollama_running which starts the service
+        await self._ensure_ollama_running()
+        logger.info("Ollama service restarted")
 
     async def _ensure_ollama_running(self) -> None:
         """Check that the Ollama service is reachable, start it if not."""

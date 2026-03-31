@@ -28,10 +28,12 @@ class ModelConfig:
 
 @dataclass
 class OpusConfig:
+    provider: str = "claude"
     daily_budget_usd: float = 50.0
     hourly_budget_usd: float = 10.0
     session_dir: str = "./data/opus_sessions"
     model: str = "claude-opus-4-6"
+    model_reasoning_effort: str = "xhigh"
     default_max_turns: int = 10
     default_max_budget_per_call_usd: float = 0.50
 
@@ -86,7 +88,7 @@ class Loop1Config:
 class Loop2Config:
     teacher_ratio: float = 0.20
     mentor_ratio: float = 0.80
-    min_buffer_size: int = 500
+    min_buffer_size: int = 10
     max_buffer_size: int = 5000
     diversity_min_task_types: int = 3
     diversity_min_failure_modes: int = 3
