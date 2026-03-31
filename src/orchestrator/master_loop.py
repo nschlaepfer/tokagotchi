@@ -581,6 +581,11 @@ class MasterLoop:
             while not self._shutdown_event.is_set():
                 try:
                     if self._is_overnight_window():
+                        # Wait for Loop 2 to finish if it's training
+                        if self._loop_status.get("loop2_distill") == "training":
+                            logger.info("Loop 3: waiting for Loop 2 SFT to finish...")
+                            await asyncio.sleep(60)
+                            continue
                         logger.info("Loop 3: overnight window — starting RL")
                         self._loop_status["loop3_rl"] = "training"
 

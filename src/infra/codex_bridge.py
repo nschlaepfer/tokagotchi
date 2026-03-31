@@ -29,6 +29,15 @@ for candidate in [
         break
 
 
+def _get_codex_env() -> dict[str, str]:
+    """Build an environment dict with npm global bin dir in PATH."""
+    env = {**os.environ}
+    npm_bin = Path.home() / "AppData" / "Roaming" / "npm"
+    if npm_bin.exists():
+        env["PATH"] = f"{npm_bin}{os.pathsep}{env.get('PATH', '')}"
+    return env
+
+
 class CodexBridge:
     """Async interface to the Codex companion task runtime.
 
@@ -55,28 +64,26 @@ class CodexBridge:
         self._available: bool | None = None
 
     async def is_available(self) -> bool:
-        """Check if Codex CLI is installed and the companion script exists."""
+        """Check if Codex CLI is installed."""
         if self._available is not None:
             return self._available
 
-        if _COMPANION_SCRIPT is None:
-            logger.info("Codex companion script not found — Codex integration disabled")
-            self._available = False
-            return False
-
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "node", "--version",
+            proc = await asyncio.create_subprocess_shell(
+                "codex --version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=_get_codex_env(),
             )
-            await proc.communicate()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             self._available = proc.returncode == 0
-        except FileNotFoundError:
+            if self._available:
+                logger.info("Codex CLI available: %s", stdout.decode().strip())
+        except Exception:
             self._available = False
 
         if not self._available:
-            logger.info("Node.js not available — Codex integration disabled")
+            logger.info("Codex CLI not available — Codex integration disabled")
         return self._available
 
     async def spawn_task(
@@ -96,61 +103,55 @@ class CodexBridge:
         if not await self.is_available():
             return None
 
-        cmd = [
-            "node", _COMPANION_SCRIPT, "task",
-            "--cwd", self.cwd,
-        ]
-
-        if background:
-            cmd.append("--background")
-
+        # Use codex CLI directly (shell=True for Windows .cmd resolution)
+        _write = write if write is not None else self.write
         _model = model or self.model
-        if _model:
-            cmd.extend(["--model", _model])
-
         _effort = effort or self.effort
-        if _effort:
-            cmd.extend(["--effort", _effort])
 
-        if write if write is not None else self.write:
-            cmd.append("--write")
-
-        if fresh:
-            cmd.append("--fresh")
-
-        cmd.append(prompt)
+        # Escape the prompt for shell safety
+        safe_prompt = prompt.replace('"', '\\"')
+        parts = ["codex"]
+        if _write:
+            parts.append("--full-auto")
+        if _model:
+            parts.extend(["--model", _model])
+        parts.append(f'"{safe_prompt}"')
+        shell_cmd = " ".join(parts)
 
         logger.info("Spawning Codex task (background=%s): %.120s...", background, prompt)
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=self.cwd,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-            output = stdout.decode(errors="replace").strip()
+            env = _get_codex_env()
 
             if background:
-                # Parse job ID from output
-                for line in output.splitlines():
-                    line = line.strip()
-                    if line.startswith("job:") or line.startswith("Job "):
-                        # Extract job ID
-                        parts = line.split()
-                        for part in parts:
-                            if len(part) > 8 and part.replace("-", "").isalnum():
-                                logger.info("Codex background task spawned: %s", part)
-                                return part
-                # Fallback: return raw output
-                logger.info("Codex task output: %s", output[:200])
-                return output
+                # Run detached so it doesn't block the pipeline
+                proc = await asyncio.create_subprocess_shell(
+                    shell_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=self.cwd,
+                    env=env,
+                )
+                # Don't wait for completion — just log that it started
+                logger.info("Codex task spawned (pid=%s)", proc.pid)
+                # Give it a moment to start, then return
+                await asyncio.sleep(2)
+                return f"codex-pid-{proc.pid}"
             else:
+                proc = await asyncio.create_subprocess_shell(
+                    shell_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=self.cwd,
+                    env=env,
+                )
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+                output = stdout.decode(errors="replace").strip()
+                logger.info("Codex task completed (exit %s)", proc.returncode)
                 return output
 
         except asyncio.TimeoutError:
-            logger.warning("Codex task spawn timed out")
+            logger.warning("Codex task timed out")
             return None
         except Exception:
             logger.exception("Failed to spawn Codex task")

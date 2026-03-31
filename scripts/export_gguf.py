@@ -1,137 +1,97 @@
 #!/usr/bin/env python3
-"""Standalone LoRA → merged safetensors → Ollama export script.
-
-Runs in a SEPARATE subprocess from the training process so it gets
-a clean VRAM state. The parent process should free all PyTorch memory
-before spawning this script.
-
-Strategy: merge LoRA into base model via Unsloth's save_pretrained_merged
-(writes 16-bit safetensors to output_dir), then hand off to
-``ollama create FROM <dir>`` which handles GGUF conversion natively.
-This avoids needing llama.cpp's converter or 18GB BF16 intermediates.
-
-Usage::
-
-    python scripts/export_gguf.py \
-        --base-model models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated \
-        --adapter data/checkpoints/adapter_27ex \
-        --output-dir data/checkpoints/merged_export \
-        --ollama-tag tokagotchi:latest
-"""
-
+"""Standalone LoRA adapter -> merged GGUF -> Ollama export. Zero-GPU."""
 from __future__ import annotations
-
-import argparse
-import os
-import subprocess
-import sys
+import argparse, os, subprocess, sys
 from pathlib import Path
 
-# Suppress tqdm progress bars (crashes on headless Windows)
 os.environ["TQDM_DISABLE"] = "1"
 
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Export LoRA adapter to Ollama")
-    p.add_argument("--base-model", required=True, help="Path to base HF model")
-    p.add_argument("--adapter", required=True, help="Path to LoRA adapter directory")
-    p.add_argument("--output-dir", default="C:/temp/tokagotchi_export",
-                   help="Directory for merged safetensors output (use C: for space)")
-    p.add_argument("--ollama-tag", default="tokagotchi:latest",
-                   help="Ollama model tag to create")
-    # Keep for compat but not used directly — Ollama picks quantization
-    p.add_argument("--quantization", default="q4_k_m", help="(ignored — Ollama handles quant)")
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--base-model", required=True)
+    p.add_argument("--adapter", required=True)
+    p.add_argument("--ollama-base", default="huihui_ai/qwen3.5-abliterated:9b")
+    p.add_argument("--ollama-tag", default="tokagotchi:latest")
+    p.add_argument("--output-dir", default="C:/temp/tokagotchi_gguf")
+    p.add_argument("--quantization", default="q4_k_m")
     return p.parse_args()
 
+def find_tool(name):
+    for c in [Path.home()/".unsloth"/"llama.cpp"/name,
+              Path.home()/".unsloth"/"llama.cpp"/"build"/"bin"/"Release"/f"{name}.exe"]:
+        if c.exists(): return c
+    return None
 
-def main() -> None:
+def get_base_gguf(tag):
+    r = subprocess.run(["ollama","show",tag,"--modelfile"], capture_output=True, text=True, timeout=10)
+    for line in r.stdout.splitlines():
+        l = line.strip()
+        if l.startswith("FROM ") and ("sha256" in l or l.endswith(".gguf")):
+            return l[5:].strip()
+    return None
+
+def main():
     args = parse_args()
-
     base_model = str(Path(args.base_model).resolve())
     adapter = str(Path(args.adapter).resolve())
     output_dir = str(Path(args.output_dir).resolve())
-
-    if not Path(base_model).exists():
-        print(f"ERROR: Base model not found: {base_model}", file=sys.stderr)
-        sys.exit(1)
-    if not Path(adapter).exists():
-        print(f"ERROR: Adapter not found: {adapter}", file=sys.stderr)
-        sys.exit(1)
-
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    print(f"Base model: {base_model}")
-    print(f"Adapter:    {adapter}")
-    print(f"Output:     {output_dir}")
-    print(f"Tag:        {args.ollama_tag}")
-    sys.stdout.flush()
+    if not Path(adapter).exists():
+        print(f"ERROR: Adapter not found: {adapter}"); sys.exit(1)
+    if not Path(base_model).exists():
+        print(f"ERROR: Base model not found: {base_model}"); sys.exit(1)
 
-    # ---- Load model + adapter ----
-    import torch
-    from unsloth import FastModel
+    base_gguf = get_base_gguf(args.ollama_base)
+    if not base_gguf:
+        print(f"ERROR: No GGUF for {args.ollama_base}"); sys.exit(1)
+    print(f"Base GGUF: {base_gguf}")
 
-    print("Loading base model (4-bit)...")
-    sys.stdout.flush()
-    model, processor = FastModel.from_pretrained(
-        model_name=base_model,
-        max_seq_length=2048,
-        load_in_4bit=True,
-    )
-    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-    print("Base model loaded")
+    lora_gguf = str(Path(output_dir) / "adapter.gguf")
+    merged_gguf = str(Path(output_dir) / "tokagotchi-merged.gguf")
 
-    from peft import PeftModel
-    model = PeftModel.from_pretrained(model, adapter)
-    print("LoRA adapter applied")
-    sys.stdout.flush()
+    # Step 1: Convert LoRA safetensors -> GGUF
+    converter = find_tool("convert_lora_to_gguf.py")
+    if not converter:
+        print("ERROR: convert_lora_to_gguf.py not found"); sys.exit(1)
+    print("Step 1: LoRA safetensors -> GGUF adapter...")
+    r = subprocess.run([sys.executable, str(converter), "--base", base_model,
+        "--outfile", lora_gguf, "--outtype", "f16", adapter],
+        capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        print(f"FAILED: {r.stderr[:500]}"); sys.exit(1)
+    print(f"   Done: {Path(lora_gguf).stat().st_size/1024/1024:.0f} MB")
 
-    # ---- Save merged model as 16-bit safetensors ----
-    # This dequantizes 4-bit → 16-bit and merges LoRA deltas in one pass.
-    # Output is ~18GB of safetensors that Ollama can natively convert.
-    print("Saving merged model (16-bit safetensors)...")
-    sys.stdout.flush()
-    model.save_pretrained_merged(
-        output_dir,
-        tokenizer,
-        save_method="merged_16bit",
-    )
-    print("Merged model saved")
+    # Step 2: Merge base GGUF + LoRA GGUF
+    export_lora = find_tool("llama-export-lora")
+    if not export_lora:
+        print("ERROR: llama-export-lora not found"); sys.exit(1)
+    print("Step 2: Merging base + LoRA...")
+    r = subprocess.run([str(export_lora), "--model", base_gguf, "--lora", lora_gguf,
+        "--output", merged_gguf], capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        print(f"FAILED: {r.stderr[:500]}"); sys.exit(1)
+    print(f"   Done: {Path(merged_gguf).stat().st_size/1024/1024/1024:.1f} GB")
 
-    # ---- Free GPU ----
-    del model, tokenizer, processor
-    import gc
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print("GPU memory freed")
+    # Cleanup adapter GGUF
+    try: Path(lora_gguf).unlink()
+    except: pass
 
-    # ---- Write Modelfile for Ollama ----
-    modelfile_path = Path(output_dir) / "Modelfile"
-    abs_output = str(Path(output_dir).resolve())
-    modelfile_path.write_text(f'FROM "{abs_output}"\n', encoding="utf-8")
-    print(f"Modelfile written: {modelfile_path}")
+    # Step 3: Import to Ollama
+    mf = Path(output_dir) / "Modelfile"
+    mf.write_text(f'FROM "{Path(merged_gguf).resolve()}"\n', encoding="utf-8")
+    print(f"Step 3: ollama create {args.ollama_tag}...")
+    r = subprocess.run(["ollama","create",args.ollama_tag,"-f",str(mf)],
+        capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        print(f"FAILED: {r.stderr[:300]}"); sys.exit(1)
+    print(f"   Ollama model: {args.ollama_tag}")
 
-    # ---- Import into Ollama ----
-    print(f"Running: ollama create {args.ollama_tag} ...")
-    sys.stdout.flush()
-    result = subprocess.run(
-        ["ollama", "create", args.ollama_tag, "-f", str(modelfile_path)],
-        capture_output=True,
-        text=True,
-        timeout=900,  # Ollama conversion can take 10+ min
-        cwd=output_dir,
-    )
-    if result.returncode == 0:
-        print(f"Ollama model created: {args.ollama_tag}")
-    else:
-        print(f"WARNING: ollama create failed (exit {result.returncode})", file=sys.stderr)
-        print(f"stdout: {result.stdout[:500]}", file=sys.stderr)
-        print(f"stderr: {result.stderr[:500]}", file=sys.stderr)
-        # Still print EXPORT_OK if merged safetensors are saved
-        # The user can manually run ollama create later
+    # Cleanup merged GGUF (now in Ollama's blob store)
+    try: Path(merged_gguf).unlink()
+    except: pass
 
     print("EXPORT_OK")
-
 
 if __name__ == "__main__":
     main()
