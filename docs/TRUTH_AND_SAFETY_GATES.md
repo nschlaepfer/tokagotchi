@@ -94,6 +94,22 @@ Enabling SFT, RL, or checkpoint promotion also requires complete gate evidence a
 
 Loop 2 reads the pending buffer transactionally for training. It only clears examples after serving-model promotion succeeds; if training, export, or a safety gate fails, the pending examples stay available for review/retry.
 
+The evidence must also identify a clean git tree. A dirty working tree cannot satisfy the autonomous-learning gate because the proof would not identify exactly what code was validated.
+
+### 6. Docker proof runner writes reviewable evidence
+
+Use:
+
+```bash
+python3 scripts/prove_docker_gate.py
+```
+
+This builds the arena image, builds a clean proof image, runs validation inside that proof image, and writes artifacts under `data/proofs/docker_gate/<timestamp>/`.
+
+The generated `truth_gate_candidate.json` keeps `human_reviewed: false` by design. It is a candidate for human review, not an automatic unlock file.
+
+The proof requires a mountable Unix Docker socket for nested arena validation. See `docs/DOCKER_PROOF.md`.
+
 ## Gate criteria before enabling autonomous learning
 
 Do not enable autonomous SFT/RL/promotion until all of these are true:
@@ -114,6 +130,7 @@ Example evidence shape:
   "truth_grounding_passed": true,
   "human_reviewed": true,
   "git_commit": "COMMITTED_SHA",
+  "git_dirty": false,
   "task_judge_canonical": true,
   "arena": {
     "backend": "docker",
@@ -135,8 +152,8 @@ Example evidence shape:
   },
   "tests": {
     "suite": "scripts/test_all_loops.py",
-    "total": 27,
-    "passed": 26,
+    "total": 29,
+    "passed": 28,
     "failures": 0,
     "skipped": 1
   },
@@ -158,10 +175,17 @@ Example evidence shape:
       "exit_code": 0
     },
     {
-      "command": "/tmp/tokagotchi-venv/bin/python scripts/test_all_loops.py",
+      "command": "python scripts/test_all_loops.py --json-out /proof/integration_tests.json",
       "exit_code": 0
     }
-  ]
+  ],
+  "proof_artifacts": {
+    "proof_dir": "data/proofs/docker_gate/TIMESTAMP",
+    "inside_results": "data/proofs/docker_gate/TIMESTAMP/inside-results.json",
+    "integration_tests": "data/proofs/docker_gate/TIMESTAMP/integration_tests.json",
+    "task_bank_static": "data/proofs/docker_gate/TIMESTAMP/task_bank_static.json",
+    "task_bank_docker": "data/proofs/docker_gate/TIMESTAMP/task_bank_docker.json"
+  }
 }
 ```
 
@@ -172,22 +196,26 @@ Commands run:
 ```bash
 python3 -m compileall -q src scripts
 git diff --check
-/tmp/tokagotchi-venv/bin/python scripts/test_all_loops.py
+/tmp/tokagotchi-proof-venv/bin/python scripts/test_all_loops.py --json-out /tmp/tokagotchi-local-tests.json
 python3 scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only
 python3 scripts/validate_task_bank.py data/curriculum/seed_tasks.json --unsafe-host-code-execution --command-timeout-seconds 5 --summary
+python3 scripts/tokagotchi_doctor.py --json-out /tmp/tokagotchi-doctor.json
+python3 scripts/prove_docker_gate.py --dry-run
 ```
 
 Results:
 
 - Compile: passed.
 - Whitespace diff check: passed.
-- Integration suite: 27 total, 26 pass, 1 skip, 0 fail.
+- Integration suite in a dependency-complete venv: 29 total, 28 pass, 1 skip, 0 fail.
 - Skip reason: PyTorch was not installed for the DAPO clipper test in the lightweight validation environment.
 - Current seed task bank before repair: failed validation, as expected.
   - 4/20 tasks were statically valid.
   - Invalid tasks were missing expected outputs, reference files, or open-ended benchmark metadata.
 - Current repaired seed task bank: passed static validation.
 - Current repaired seed task bank: passed executable starter/reference validation with 20/20 executable tasks, 20/20 starters failing, 20/20 references passing, and 5/5 optimization benchmark proofs passing for reference artifacts.
+- Docker proof runner dry-run: passed and emitted the exact command plan.
+- Docker proof runner real run in current WSL: blocked cleanly because Docker daemon integration is unavailable; it wrote a blocked proof artifact under `data/proofs/docker_gate/`.
 
 That failed seed-bank validation is intentional proof that the validator catches weak benchmark entries. The repaired seed bank must pass both static validation and executable starter/reference validation before it can become trusted benchmark evidence.
 

@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY pyproject.toml README.md ./
+COPY config ./config
+COPY data/curriculum ./data/curriculum
+COPY data/prompts ./data/prompts
+COPY data/task_bank.json ./data/task_bank.json
+COPY docker ./docker
+COPY scripts ./scripts
+COPY src ./src
+
+RUN python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir -e ".[test]"
+
+CMD ["python", "scripts/test_all_loops.py"]

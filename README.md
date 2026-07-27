@@ -22,6 +22,8 @@ See [docs/PRODUCT_FLYWHEEL.md](docs/PRODUCT_FLYWHEEL.md) for the detailed succes
 
 Safety status: autonomous SFT, RL, and checkpoint promotion are disabled by default until oracle-backed task validation and reproducible test evidence pass. See [docs/TRUTH_AND_SAFETY_GATES.md](docs/TRUTH_AND_SAFETY_GATES.md).
 
+Docker proof status: a repeatable proof runner now exists, but autonomous learning is still locked until it passes on a machine where Docker works. See [docs/DOCKER_PROOF.md](docs/DOCKER_PROOF.md).
+
 Three training loops support that product flywheel:
 
 ### Loop 1 — Prompt Evolution (minutes)
@@ -86,6 +88,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 - **Subscription auth**: Default teacher calls route through `codex exec`, so normal Codex subscription login is used instead of project-level API keys. If you opt into Claude, calls route through `claude -p`.
 - **Product-use traces**: Real-use traces are written locally under `data/usage_traces/`, redacted for common secret patterns, ignored by Git, and blocked from training until accepted through feedback controls.
 - **Sandbox backend**: Arena loops require Docker by default and fail closed if Docker is unavailable. Host subprocess execution is dev-only and requires `--unsafe-host-code-execution`.
+- **Docker proof gate**: `scripts/prove_docker_gate.py` builds the arena image, builds a clean proof image, runs task-bank validation through Docker, runs the integration suite, and writes reviewable JSON evidence under `data/proofs/`.
 - **Canonical judge**: `TaskJudge` is the single success authority. A `submit` action is not success unless the task oracle passes.
 - **Mutation lineage**: Every genome stores its mutation type, teacher diagnosis, rationale, and creation timestamp. Full mutation history logs to `mutation_log.jsonl`.
 - **Trajectory persistence**: Eval results save full step-by-step data (actions, observations, reasoning, rewards) for replay and analysis.
@@ -147,8 +150,20 @@ python scripts/review_usage_trace.py accept TRACE_ID --rating 5 --promote
 # Dry-run trace collection without Ollama or Codex calls
 python scripts/run_usage_flywheel.py "Check flywheel wiring." --dry-run
 
+# Check local dogfood readiness and safety-gate state
+python scripts/tokagotchi_doctor.py --check-ollama
+
 # Validate tasks before optimization
 python scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only
+
+# Dry-run the Docker proof command plan
+python scripts/prove_docker_gate.py --dry-run
+
+# Run the real Docker proof on a machine where Docker works
+python scripts/prove_docker_gate.py
+
+# WSL fallback if Docker Desktop is running and a Unix Docker socket is available
+python scripts/prove_docker_gate.py --docker-bin "/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"
 
 # Or run just Loop 1 (prompt evolution, cheapest; requires Docker by default)
 python scripts/run_loop1.py --iterations 10
@@ -175,6 +190,38 @@ tokagotchi/
 ├── scripts/             # CLI entry points + setup
 └── eval/                # Benchmarks + regression suite
 ```
+
+## Proof Gates
+
+Use this order:
+
+1. Local checks while developing:
+
+   ```bash
+   python -m compileall -q src scripts
+   python scripts/test_all_loops.py --json-out /tmp/tokagotchi-tests.json
+   python scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only --summary
+   python scripts/validate_task_bank.py data/curriculum/seed_tasks.json --unsafe-host-code-execution --command-timeout-seconds 5 --summary
+   python scripts/tokagotchi_doctor.py --json-out /tmp/tokagotchi-doctor.json
+   ```
+
+2. Docker proof before unlocking autonomous learning:
+
+   ```bash
+   python scripts/prove_docker_gate.py
+   ```
+
+   If you are in WSL and Docker Desktop is running with a mountable Unix Docker socket:
+
+   ```bash
+   python scripts/prove_docker_gate.py --docker-bin "/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"
+   ```
+
+3. Human review of `data/proofs/docker_gate/<timestamp>/truth_gate_candidate.json`.
+
+Do not enable autonomous SFT, RL, or checkpoint promotion from host-only proof.
+
+If local Docker Desktop is unavailable, use the `Docker Proof Gate` GitHub Actions workflow. It runs the same proof runner on an Ubuntu runner and uploads the proof artifacts for review.
 
 ## Research
 

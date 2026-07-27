@@ -50,6 +50,14 @@ codex exec \
 
 Do not vendor the entire Codex repository yet. That adds maintenance burden before tokagotchi needs to patch Codex internals. The stable first step is a harness contract around the CLI. Vendoring becomes worth it only if tokagotchi needs deeper control over tool traces, session persistence, custom policies, or local OSS-provider orchestration that the CLI cannot expose.
 
+Current Codex integration phase:
+
+1. Use the CLI contract: `codex exec`, explicit model, explicit reasoning effort, explicit sandbox, JSON events, and final-message capture.
+2. Keep default boost sandbox read-only; require `--write` for workspace-write boosts.
+3. Normalize the JSON event stream into compact trace events before using it for training filters.
+4. Add per-task context manifests so captured context is deliberate.
+5. Only consider vendoring Codex if the CLI boundary cannot expose the trace, policy, or session controls needed for local learning.
+
 ## Privacy boundary
 
 Default mode is local trace storage:
@@ -147,6 +155,32 @@ Promotion refuses unreviewed, rejected, private, sensitive, low-rated, or answer
 
 That keeps the existing Loop 2 pending-buffer shape. Autonomous SFT is still blocked by safety gates until Docker-backed task validation and truth-grounding evidence pass.
 
+## Proof workflow
+
+Local development proof:
+
+```bash
+python3 -m compileall -q src scripts
+python3 scripts/test_all_loops.py --json-out /tmp/tokagotchi-tests.json
+python3 scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only --summary
+python3 scripts/validate_task_bank.py data/curriculum/seed_tasks.json --unsafe-host-code-execution --command-timeout-seconds 5 --summary
+python3 scripts/tokagotchi_doctor.py --json-out /tmp/tokagotchi-doctor.json
+```
+
+Docker gate proof:
+
+```bash
+python3 scripts/prove_docker_gate.py
+```
+
+If Docker is unavailable, run:
+
+```bash
+python3 scripts/prove_docker_gate.py --dry-run
+```
+
+Dry-run proof is only a command-plan check. It does not unlock training.
+
 ## OmniGEPA research notes
 
 GEPA's core idea is trace-aware reflective optimization: capture execution traces, convert them into actionable side information, mutate candidate artifacts, and keep candidates that improve a score.
@@ -185,8 +219,9 @@ This goal is not complete when the code merely runs once. Success means:
 9. Accepted traces can become pending SFT examples in the existing Loop 2 format.
 10. Generated traces are not committed.
 11. Tests cover trace persistence, redaction, dry-run behavior, feedback controls, promotion gating, and Codex harness command construction.
-12. The default Qwen model is actually pulled and smoke-tested locally, or the exact blocker is recorded.
-13. The docs state what is local, what is sent to Codex, and what remains future work.
+12. The Docker proof runner produces reviewable machine evidence, or the exact Docker blocker is recorded.
+13. The default Qwen model is actually pulled and smoke-tested locally, or the exact blocker is recorded.
+14. The docs state what is local, what is sent to Codex, and what remains future work.
 
 ## Validation status on 2026-07-27
 
@@ -195,6 +230,9 @@ This goal is not complete when the code merely runs once. Success means:
 - A bounded smoke test with `num_ctx=2048`, `num_predict=16`, and `temperature=0` returned `TOKA_QWEN_OK`.
 - In WSL, `localhost:11434` was not reachable, but the Windows host gateway `172.24.224.1:11434` was reachable. The code now tries that gateway automatically after the configured localhost endpoint.
 - The integration suite now includes feedback/promotion controls; rerun `scripts/test_all_loops.py` after changing this flow.
+- `scripts/test_all_loops.py --json-out /tmp/tokagotchi-local-tests.json` passed in a dependency-complete venv with 29 total, 28 pass, 1 skip, and 0 fail.
+- `scripts/prove_docker_gate.py --dry-run` passed and emitted the Docker command plan.
+- `scripts/prove_docker_gate.py` blocked cleanly in the current WSL environment because Docker daemon integration is unavailable. Docker-backed proof remains required before autonomous training/promotion is unlocked.
 - Direct flywheel smokes passed for both the local student path (`TOKA_FLYWHEEL_OK`) and the Codex boost path (`TOKA_CODEX_FLYWHEEL_OK`).
 - The Ollama-backed compatibility server passed a start/chat/stop smoke through the WSL gateway (`TOKA_SERVER_OK`).
 

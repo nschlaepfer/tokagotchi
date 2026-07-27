@@ -16,6 +16,7 @@ env/
 data/traces/
 data/usage_traces/
 data/checkpoints/
+data/proofs/
 data/pending.jsonl
 data/opus_sessions/
 data/curriculum/task_bank.json

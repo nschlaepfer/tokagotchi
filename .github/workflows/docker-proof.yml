@@ -1,0 +1,48 @@
+name: Docker Proof Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/docker-proof.yml"
+      - "config/**"
+      - "data/curriculum/**"
+      - "data/prompts/**"
+      - "data/task_bank.json"
+      - "docker/**"
+      - "docs/DOCKER_PROOF.md"
+      - "docs/PRODUCT_FLYWHEEL.md"
+      - "docs/TRUTH_AND_SAFETY_GATES.md"
+      - "pyproject.toml"
+      - "scripts/**"
+      - "src/**"
+
+permissions:
+  contents: read
+
+jobs:
+  docker-proof:
+    name: Docker proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Docker version
+        run: docker version
+
+      - name: Run Docker proof gate
+        run: python3 scripts/prove_docker_gate.py
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tokagotchi-docker-proof
+          path: data/proofs/docker_gate/
+          if-no-files-found: warn

@@ -70,6 +70,8 @@ def validate_gate_evidence(evidence: dict[str, Any]) -> list[str]:
         issues.append("human_review_required")
     if not evidence.get("git_commit"):
         issues.append("missing_git_commit")
+    if evidence.get("git_dirty") is not False:
+        issues.append("git_tree_must_be_clean")
     if evidence.get("task_judge_canonical") is not True:
         issues.append("task_judge_not_canonical")
 

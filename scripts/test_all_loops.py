@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import argparse
 import json
 import subprocess
 import sys
@@ -1400,6 +1401,7 @@ def test_23_autonomous_safety_gates():
         )
         weak_issues = validate_gate_evidence(load_gate_evidence(evidence_path))
         assert "schema_version_must_be_1" in weak_issues
+        assert "git_tree_must_be_clean" in weak_issues
         assert "missing_arena_evidence" in weak_issues
         assert "missing_reproducible_commands" in weak_issues
         for gate in (
@@ -1454,6 +1456,7 @@ def _truth_gate_evidence(*, arena_backend: str) -> dict[str, Any]:
         "truth_grounding_passed": True,
         "human_reviewed": True,
         "git_commit": "test-commit",
+        "git_dirty": False,
         "task_judge_canonical": True,
         "arena": {
             "backend": arena_backend,
@@ -1475,8 +1478,8 @@ def _truth_gate_evidence(*, arena_backend: str) -> dict[str, Any]:
         },
         "tests": {
             "suite": "scripts/test_all_loops.py",
-            "total": 27,
-            "passed": 26,
+            "total": 29,
+            "passed": 28,
             "failures": 0,
             "skipped": 1,
         },
@@ -1504,7 +1507,7 @@ def _truth_gate_evidence(*, arena_backend: str) -> dict[str, Any]:
                 "exit_code": 0,
             },
             {
-                "command": "/tmp/tokagotchi-venv/bin/python scripts/test_all_loops.py",
+                "command": "python scripts/test_all_loops.py --json-out /proof/integration_tests.json",
                 "exit_code": 0,
             },
         ],
@@ -1601,15 +1604,99 @@ def test_25_strict_benchmark_loading():
 
 
 # ===================================================================
+# Test 26: Docker proof runner dry-run artifact
+# ===================================================================
+
+def test_26_docker_proof_runner_dry_run():
+    """Proof runner should emit a reproducible command plan without Docker."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="tokagotchi-proof-") as tmp:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/prove_docker_gate.py",
+                "--dry-run",
+                "--output-root",
+                tmp,
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        proof_files = list(Path(tmp).glob("*/proof.json"))
+        assert len(proof_files) == 1, proof_files
+        proof = json.loads(proof_files[0].read_text(encoding="utf-8"))
+        assert proof["status"] == "not_run"
+        command_plan = "\n".join(proof["command_plan"])
+        assert "build -t qwen-arena:latest" in command_plan
+        assert "docker/Dockerfile.proof" in command_plan
+        assert "scripts/prove_docker_gate.py --inside-container" in command_plan
+
+    return "Docker proof runner emits a dry-run command plan"
+
+
+# ===================================================================
+# Test 27: Tokagotchi doctor
+# ===================================================================
+
+def test_27_tokagotchi_doctor():
+    """Doctor command should report dogfood readiness and locked autonomy."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="tokagotchi-doctor-") as tmp:
+        json_out = Path(tmp) / "doctor.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "scripts/tokagotchi_doctor.py",
+                "--skip-docker",
+                "--json-out",
+                str(json_out),
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(json_out.read_text(encoding="utf-8"))
+        assert report["schema_version"] == 1
+        assert report["overall"] in {"ok", "warn"}
+        checks = {row["name"]: row for row in report["checks"]}
+        assert checks["safety_config"]["status"] == "ok"
+        assert checks["gate_evidence"]["status"] == "locked"
+        assert report["autonomy_locked"] is True
+
+    return "Doctor reports local readiness and keeps autonomy locked"
+
+
+# ===================================================================
 # Main
 # ===================================================================
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run Tokagotchi integration tests.")
+    parser.add_argument(
+        "--json-out",
+        type=Path,
+        help="Optional path to write a structured integration-test report.",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    started_at = time.strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 60)
     print("  TOKAGOTCHI INTEGRATION TEST SUITE")
     print(f"  Project root: {PROJECT_ROOT}")
     print(f"  Python: {sys.version.split()[0]}")
-    print(f"  Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  Time: {started_at}")
     print("=" * 60)
 
     tests = [
@@ -1640,6 +1727,8 @@ def main():
         ("Test 24: Autonomous safety gates", test_23_autonomous_safety_gates),
         ("Test 25: Teacher-generated oracle gate", test_24_teacher_generated_oracle_gate),
         ("Test 26: Strict benchmark loading", test_25_strict_benchmark_loading),
+        ("Test 27: Docker proof runner dry run", test_26_docker_proof_runner_dry_run),
+        ("Test 28: Tokagotchi doctor", test_27_tokagotchi_doctor),
     ]
 
     for name, func in tests:
@@ -1664,6 +1753,24 @@ def main():
     print(f"\n  Total: {len(_results)} tests | "
           f"PASS: {pass_count} | FAIL: {fail_count} | SKIP: {skip_count} | "
           f"Time: {total_time:.2f}s")
+
+    report = {
+        "suite": "scripts/test_all_loops.py",
+        "project_root": str(PROJECT_ROOT),
+        "python": sys.version.split()[0],
+        "started_at": started_at,
+        "total": len(_results),
+        "passed": pass_count,
+        "failures": fail_count,
+        "skipped": skip_count,
+        "elapsed_seconds": total_time,
+        "success": fail_count == 0,
+        "results": _results,
+    }
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(f"\n  JSON report: {args.json_out}")
 
     if fail_count > 0:
         print("\n  ** FAILURES DETECTED **")

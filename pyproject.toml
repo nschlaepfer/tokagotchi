@@ -46,6 +46,8 @@ qsi-loop3 = "scripts.run_loop3:main"
 qsi-all = "scripts.run_all:main"
 tokagotchi-flywheel = "scripts.run_usage_flywheel:main"
 tokagotchi-validate-tasks = "scripts.validate_task_bank:main"
+tokagotchi-prove-docker-gate = "scripts.prove_docker_gate:main"
+tokagotchi-doctor = "scripts.tokagotchi_doctor:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
