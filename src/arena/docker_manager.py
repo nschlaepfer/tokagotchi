@@ -7,8 +7,10 @@ and a pre-warmed container pool for efficient episode throughput.
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import io
+import json
 import logging
 import tarfile
 from dataclasses import dataclass, field
@@ -236,7 +238,17 @@ class DockerManager:
         """
         container = self.client.containers.get(container_id)
         tar_stream = _make_tar(files)
-        container.put_archive(WORKSPACE_DIR, tar_stream)
+        try:
+            container.put_archive(WORKSPACE_DIR, tar_stream)
+        except APIError as exc:
+            if "read-only" not in str(exc).lower():
+                raise
+            logger.debug(
+                "Docker put_archive failed on read-only rootfs; falling back "
+                "to in-container workspace writer for %s",
+                container_id[:12],
+            )
+            self._write_files_via_exec(container_id, files)
 
     async def async_copy_files_to_container(
         self,
@@ -244,6 +256,27 @@ class DockerManager:
         files: dict[str, str],
     ) -> None:
         await asyncio.to_thread(self.copy_files_to_container, container_id, files)
+
+    def _write_files_via_exec(self, container_id: str, files: dict[str, str]) -> None:
+        """Write task files through Python inside the container.
+
+        Docker's archive API can reject ``put_archive`` when the container uses a
+        read-only root filesystem, even when ``/workspace`` is a writable tmpfs.
+        This fallback keeps the hardened container settings and writes only
+        workspace-relative files from inside the container.
+        """
+
+        command = _make_workspace_write_command(files)
+        stdout, stderr, exit_code = self.exec_in_container(
+            container_id,
+            command,
+            timeout=max(self.default_timeout, 30),
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                "Failed to write task files into Docker workspace: "
+                f"exit={exit_code} stdout={stdout[:500]!r} stderr={stderr[:500]!r}"
+            )
 
     # ------------------------------------------------------------------
     # Cleanup / destroy
@@ -318,6 +351,31 @@ def _make_tar(files: dict[str, str]) -> bytes:
             tar.addfile(info, io.BytesIO(data))
     buf.seek(0)
     return buf.read()
+
+
+def _make_workspace_write_command(files: dict[str, str]) -> str:
+    """Build a Python command that writes files under ``/workspace`` safely."""
+
+    payload = {
+        workspace_relative_path(name): base64.b64encode(content.encode("utf-8")).decode("ascii")
+        for name, content in files.items()
+    }
+    payload_json = json.dumps(payload, sort_keys=True)
+    return (
+        "python - <<'PY'\n"
+        "import base64\n"
+        "import json\n"
+        "from pathlib import Path\n"
+        f"payload = json.loads({payload_json!r})\n"
+        f"root = Path({WORKSPACE_DIR!r}).resolve()\n"
+        "for name, encoded in payload.items():\n"
+        "    path = (root / name).resolve()\n"
+        "    if path != root and root not in path.parents:\n"
+        "        raise RuntimeError(f'Unsafe workspace path: {name}')\n"
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    path.write_bytes(base64.b64decode(encoded))\n"
+        "PY"
+    )
 
 
 def _run_exec_with_timeout(

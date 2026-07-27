@@ -1097,6 +1097,16 @@ def test_19_arena_fail_closed():
     import src.arena.docker_manager as dm
     from src.arena.subprocess_manager import SubprocessManager
 
+    command = dm._make_workspace_write_command({"nested/ok.txt": "hello from task"})
+    assert "/workspace" in command
+    assert "nested/ok.txt" in command
+    assert "hello from task" not in command, "File contents should be base64 encoded"
+    try:
+        dm._make_workspace_write_command({"../escape.txt": "bad"})
+        raise AssertionError("Expected traversal rejection in workspace writer")
+    except ValueError:
+        pass
+
     original_docker = dm.docker
     dm.docker = None
     try:
