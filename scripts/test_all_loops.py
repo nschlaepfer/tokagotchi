@@ -1101,6 +1101,10 @@ def test_19_arena_fail_closed():
     assert "/workspace" in command
     assert "nested/ok.txt" in command
     assert "hello from task" not in command, "File contents should be base64 encoded"
+    assert "mode=1777" in dm.WORKSPACE_TMPFS_OPTIONS, (
+        "Docker tmpfs workspace must be writable by the non-root agent user "
+        "when the container rootfs is read-only"
+    )
     try:
         dm._make_workspace_write_command({"../escape.txt": "bad"})
         raise AssertionError("Expected traversal rejection in workspace writer")

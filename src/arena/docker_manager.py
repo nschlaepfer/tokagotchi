@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 ARENA_IMAGE = "qwen-arena:latest"
 WORKSPACE_DIR = "/workspace"
+WORKSPACE_TMPFS_OPTIONS = "rw,nosuid,nodev,size=512m,mode=1777"
 DEFAULT_POOL_SIZE = 4
 DEFAULT_EXEC_TIMEOUT = 30
 
@@ -162,7 +163,7 @@ class DockerManager:
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
             read_only=True,
-            tmpfs={WORKSPACE_DIR: "rw,nosuid,nodev,size=512m"},
+            tmpfs={WORKSPACE_DIR: WORKSPACE_TMPFS_OPTIONS},
             working_dir=WORKSPACE_DIR,
             user="agent",
         )
