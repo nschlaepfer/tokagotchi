@@ -1105,6 +1105,8 @@ def test_19_arena_fail_closed():
         "Docker tmpfs workspace must be writable by the non-root agent user "
         "when the container rootfs is read-only"
     )
+    arena_dockerfile = (PROJECT_ROOT / "docker" / "Dockerfile.arena").read_text()
+    assert "pytest" in arena_dockerfile, "Arena image must include pytest for seed-task oracles"
     try:
         dm._make_workspace_write_command({"../escape.txt": "bad"})
         raise AssertionError("Expected traversal rejection in workspace writer")

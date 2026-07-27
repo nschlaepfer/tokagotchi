@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir \
     requests \
     pandas \
     numpy \
-    flask
+    flask \
+    pytest
 
 # Create non-root user
 RUN useradd -m -s /bin/bash agent
