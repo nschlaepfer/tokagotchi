@@ -41,7 +41,7 @@ MAX_OBSERVATION_CHARS = 4000
 
 # ---------------------------------------------------------------------------
 # Regex patterns for parsing Qwen's action output.
-# Qwen3.5 produces many formats; we try them in priority order.
+# Qwen thinking models produce many formats; we try them in priority order.
 # ---------------------------------------------------------------------------
 
 # 1. Structured bracket: [action_type: content] or [action_type]\ncontent

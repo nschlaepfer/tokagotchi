@@ -1,6 +1,6 @@
 """Loop 2: On-policy distillation modules.
 
-Collects Qwen rollouts, performs Opus-guided trace surgery on failures,
+Collects Qwen rollouts, performs teacher-guided trace surgery on failures,
 accumulates corrected traces, and triggers QLoRA SFT.
 """
 

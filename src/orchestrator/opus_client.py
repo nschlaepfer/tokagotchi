@@ -1,7 +1,7 @@
-"""Async wrapper around Claude Code headless mode for programmatic Opus 4.6 calls.
+"""Async teacher-model client for Codex-first and optional Claude Code calls.
 
-Uses ``claude -p`` CLI subprocess with structured JSON output to drive
-trace analysis, prompt mutation, task generation, and trajectory rating.
+Uses ``codex exec`` by default and can still route through ``claude -p`` when
+``OpusConfig.provider`` is set to ``"claude"``.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class OpusResponse:
-    """Parsed response from a single Opus CLI call."""
+    """Parsed response from a single teacher CLI call."""
 
     raw_json: dict[str, Any] = field(default_factory=dict)
     text: str = ""
@@ -53,12 +54,16 @@ class OpusResponse:
 
 
 class OpusClient:
-    """Async wrapper around the ``claude`` CLI for structured Opus queries.
+    """Async wrapper around the configured teacher CLI.
+
+    The class name is kept for compatibility with the existing pipeline. New
+    configs default to Codex/GPT-5.6 Sol; Claude Code/Opus remains available by
+    setting ``provider: "claude"``.
 
     Parameters
     ----------
     config:
-        Opus-specific configuration (budget limits, model, session dir, etc.).
+        Teacher configuration (provider, budget limits, model, session dir, etc.).
     budget_tracker:
         Shared budget tracker instance for cost accounting.
     max_retries:
@@ -98,7 +103,7 @@ class OpusClient:
         session_id: str | None = None,
         max_turns: int | None = None,
     ) -> OpusResponse:
-        """Send a prompt to Opus via ``claude -p`` and return a parsed response.
+        """Send a prompt to the configured teacher provider and return a response.
 
         Parameters
         ----------
@@ -109,7 +114,8 @@ class OpusClient:
         json_schema:
             If provided, passed via ``--json-schema`` to constrain output.
         max_budget_usd:
-            Per-call budget cap (``--max-budget-usd``). Falls back to config default.
+            Per-call accounting cap. Claude can pass this to the CLI; Codex uses
+            subscription auth, so the value is tracked only for observability.
         session_id:
             Session ID for ``--resume`` to continue a conversation.
         max_turns:
@@ -125,14 +131,17 @@ class OpusClient:
                 error_message="Budget pre-check failed: would exceed limits",
             )
 
-        cmd, stdin_text = self._build_command(
-            prompt=prompt,
-            tools=tools,
-            json_schema=json_schema,
-            max_budget_usd=budget,
-            session_id=session_id,
-            max_turns=turns,
-        )
+        try:
+            cmd, stdin_text = self._build_command(
+                prompt=prompt,
+                tools=tools,
+                json_schema=json_schema,
+                max_budget_usd=budget,
+                session_id=session_id,
+                max_turns=turns,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return OpusResponse(is_error=True, error_message=str(exc))
 
         response = await self._run_with_retries(cmd, stdin_text=stdin_text, budget_usd=budget, loop_id="query")
         return response
@@ -142,9 +151,9 @@ class OpusClient:
     # ------------------------------------------------------------------
 
     async def analyze_trace(self, trace: Trajectory) -> TraceAnalysis:
-        """Send a full trajectory to Opus for diagnosis and analysis.
+        """Send a full trajectory to the teacher for diagnosis and analysis.
 
-        Returns a :class:`TraceAnalysis` populated from Opus's structured output.
+        Returns a :class:`TraceAnalysis` populated from structured output.
         """
         schema = {
             "type": "object",
@@ -194,7 +203,7 @@ class OpusClient:
         genome: PromptGenome,
         traces: list[Trajectory],
     ) -> PromptGenome:
-        """Ask Opus to propose a mutation to a prompt genome based on traces.
+        """Ask the teacher to propose a mutation to a prompt genome based on traces.
 
         Returns a new :class:`PromptGenome` with the proposed changes applied.
         """
@@ -262,7 +271,7 @@ class OpusClient:
         capability_profile: dict[str, Any],
         task_type: str = "code_debugging",
     ) -> TaskSpec:
-        """Ask Opus to create a new evaluation task targeting agent weaknesses.
+        """Ask the teacher to create a new evaluation task targeting weaknesses.
 
         Parameters
         ----------
@@ -313,7 +322,7 @@ class OpusClient:
         )
 
     async def rate_trajectory(self, trajectory: Trajectory) -> list[dict[str, Any]]:
-        """Ask Opus to assign a quality rating to each step in a trajectory.
+        """Ask the teacher to assign a quality rating to each trajectory step.
 
         Returns a list of dicts, one per step, with at least ``step_idx`` and
         ``rating`` (float 0-1) keys.
@@ -416,19 +425,56 @@ class OpusClient:
         session_id: str | None = None,
         max_turns: int = 10,
     ) -> tuple[list[str], str | None]:
-        """Build the ``claude`` CLI argument list.
+        """Build the configured teacher CLI argument list.
 
         Returns (cmd, stdin_text) — if the prompt is long (>4000 chars),
         it's piped via stdin to avoid Windows command-line length limits.
         """
+        provider = self.config.provider.lower()
         stdin_text: str | None = None
 
+        if provider == "codex":
+            codex_prompt = _format_prompt_for_schema(prompt, json_schema)
+            model = self.config.model or "gpt-5.6-sol"
+            effort = self.config.model_reasoning_effort or "medium"
+            cmd = [
+                "codex",
+                "exec",
+                "--model",
+                model,
+                "-c",
+                f'model_reasoning_effort="{effort}"',
+                "--sandbox",
+                "read-only",
+            ]
+
+            if len(codex_prompt) > 4000:
+                cmd.append("-")
+                stdin_text = codex_prompt
+            else:
+                cmd.append(codex_prompt)
+
+            return cmd, stdin_text
+
+        if provider != "claude":
+            raise ValueError(
+                f"Unsupported teacher provider '{self.config.provider}'. "
+                "Use 'codex' or 'claude'."
+            )
+
         cli_cmd = _resolve_claude_cli()  # returns a list like ["node", "cli.js"]
+
+        model_args: list[str] = []
+        if self.config.model:
+            model_args.extend(["--model", self.config.model])
+        if self.config.model_reasoning_effort:
+            model_args.extend(["--effort", self.config.model_reasoning_effort])
 
         # Windows has ~8191 char command-line limit; use stdin for safety at 4000
         if len(prompt) > 4000:
             cmd = [
                 *cli_cmd,
+                *model_args,
                 "-p", "-",  # read from stdin
                 "--output-format", "json",
                 "--max-turns", str(max_turns),
@@ -438,6 +484,7 @@ class OpusClient:
         else:
             cmd = [
                 *cli_cmd,
+                *model_args,
                 "-p", prompt,
                 "--output-format", "json",
                 "--max-turns", str(max_turns),
@@ -507,7 +554,7 @@ class OpusClient:
         return OpusResponse(is_error=True, error_message=f"All retries exhausted. Last: {last_error}")
 
     async def _execute(self, cmd: list[str], *, stdin_text: str | None = None) -> OpusResponse:
-        """Run a single ``claude`` CLI invocation and parse its output."""
+        """Run a single teacher CLI invocation and parse its output."""
         timeout = 300  # 5 minutes
 
         proc = await asyncio.create_subprocess_exec(
@@ -535,6 +582,9 @@ class OpusClient:
                 is_error=True,
                 error_message=f"CLI exited with code {proc.returncode}: {stderr or stdout}",
             )
+
+        if self.config.provider.lower() == "codex":
+            return self._parse_text_output(stdout)
 
         # Parse the JSON output from claude --output-format json
         return self._parse_cli_output(stdout)
@@ -595,6 +645,20 @@ class OpusClient:
             error_message=str(error_message) if is_error else "",
         )
 
+    def _parse_text_output(self, stdout: str) -> OpusResponse:
+        """Parse plain-text CLI output, extracting a JSON object when present."""
+        text = stdout.strip()
+        return OpusResponse(
+            raw_json=_extract_json_object(text),
+            text=text,
+            cost_usd=0.0,
+            prompt_tokens=0,
+            completion_tokens=0,
+            session_id="",
+            is_error=False,
+            error_message="",
+        )
+
     # ------------------------------------------------------------------
     # Debug logging
     # ------------------------------------------------------------------
@@ -612,7 +676,7 @@ class OpusClient:
             "session_id": response.session_id,
         }
         self._call_log.append(entry)
-        logger.debug("Opus call: %s", json.dumps(entry))
+        logger.debug("Teacher call: %s", json.dumps(entry))
 
     @property
     def call_log(self) -> list[dict[str, Any]]:
@@ -623,6 +687,75 @@ class OpusClient:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+def _format_prompt_for_schema(prompt: str, json_schema: dict[str, Any] | None) -> str:
+    """Add a plain-language JSON schema instruction for providers without a schema flag."""
+    if not json_schema:
+        return prompt
+
+    schema_text = json.dumps(json_schema, indent=2, sort_keys=True)
+    return (
+        f"{prompt}\n\n"
+        "Return ONLY valid JSON. Do not include markdown fences, commentary, or prose.\n"
+        "The JSON must satisfy this JSON Schema:\n"
+        f"{schema_text}"
+    )
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Best-effort extraction of the first JSON object from plain text."""
+    stripped = text.strip()
+    if not stripped:
+        return {}
+
+    try:
+        data = json.loads(stripped)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        pass
+
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        try:
+            data = json.loads(fence_match.group(1))
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            pass
+
+    start = stripped.find("{")
+    if start < 0:
+        return {}
+
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(stripped)):
+        ch = stripped[idx]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = stripped[start:idx + 1]
+                try:
+                    data = json.loads(candidate)
+                    return data if isinstance(data, dict) else {}
+                except json.JSONDecodeError:
+                    return {}
+
+    return {}
+
 
 _CLAUDE_CLI_CMD: list[str] | None = None
 

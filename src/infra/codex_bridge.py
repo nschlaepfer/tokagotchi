@@ -2,7 +2,7 @@
 
 Provides fire-and-forget background task delegation and polling for
 results, enabling the pipeline to offload diagnosis, code review,
-and investigation tasks to GPT-5.4 via the Codex plugin.
+and investigation tasks to GPT-5.6 Sol via the Codex CLI.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,15 @@ def _get_codex_env() -> dict[str, str]:
     return env
 
 
+def _shell_join(args: list[str]) -> str:
+    """Quote a command list for create_subprocess_shell."""
+    import subprocess
+
+    if os.name == "nt":
+        return subprocess.list2cmdline(args)
+    return " ".join(shlex.quote(arg) for arg in args)
+
+
 class CodexBridge:
     """Async interface to the Codex companion task runtime.
 
@@ -53,8 +63,8 @@ class CodexBridge:
         self,
         cwd: str | Path = ".",
         *,
-        model: str | None = None,
-        effort: str = "high",
+        model: str | None = "gpt-5.6-sol",
+        effort: str = "medium",
         write: bool = False,
     ) -> None:
         self.cwd = str(Path(cwd).resolve())
@@ -103,20 +113,20 @@ class CodexBridge:
         if not await self.is_available():
             return None
 
-        # Use codex CLI directly (shell=True for Windows .cmd resolution)
+        # Use Codex CLI directly through the user's subscription login.
+        # shell=True is intentional here for Windows .cmd resolution.
         _write = write if write is not None else self.write
         _model = model or self.model
         _effort = effort or self.effort
 
-        # Escape the prompt for shell safety
-        safe_prompt = prompt.replace('"', '\\"')
-        parts = ["codex"]
-        if _write:
-            parts.append("--full-auto")
+        parts = ["codex", "exec"]
+        parts.extend(["--sandbox", "workspace-write" if _write else "read-only"])
         if _model:
             parts.extend(["--model", _model])
-        parts.append(f'"{safe_prompt}"')
-        shell_cmd = " ".join(parts)
+        if _effort:
+            parts.extend(["-c", f'model_reasoning_effort="{_effort}"'])
+        parts.append(prompt)
+        shell_cmd = _shell_join(parts)
 
         logger.info("Spawning Codex task (background=%s): %.120s...", background, prompt)
 
@@ -283,7 +293,7 @@ class CodexBridge:
     ) -> str | None:
         """Review training data quality before SFT. Non-blocking."""
         prompt = (
-            "You are reviewing training data for a self-improving coding agent (Qwen 3.5 9B).\n\n"
+            "You are reviewing training data for a self-improving coding agent (Qwen3.6 27B).\n\n"
             f"## Buffer Stats\n{json.dumps(buffer_stats, indent=2, default=str)}\n\n"
             f"## Sample Examples ({len(examples_sample)} of buffer)\n"
         )
@@ -348,7 +358,7 @@ class CodexBridge:
         genome_summary: dict[str, Any],
         trace_context: str = "",
     ) -> str | None:
-        """Analyze failure patterns to produce compressed diagnostics for Opus. Non-blocking."""
+        """Analyze failure patterns to produce compressed diagnostics. Non-blocking."""
         prompt = (
             "You are diagnosing failures in a coding agent's evaluation runs.\n\n"
             f"## Failure Pattern Distribution\n{json.dumps(failure_patterns, indent=2, default=str)}\n\n"

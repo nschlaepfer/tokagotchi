@@ -1,18 +1,43 @@
 model:
-  name: "tokagotchi:latest"
-  quantization: ""
+  # Local serving model. After Loop 2 export, the orchestrator switches this
+  # in memory to tokagotchi:latest while keeping base_ollama_model for merges.
+  name: "qwen3.6:27b"
+  base_ollama_model: "qwen3.6:27b"
+  quantization: "q4_k_m"
   ollama_port: 11434
   ollama_host: "localhost"
+  hf_model_path: "models/Qwen3.6-27B"
+  hf_model_path_27b: "models/Qwen3.6-27B"
+  hf_model_path_35b_a3b: "models/Qwen3.6-35B-A3B"
 
 opus:
-  provider: "claude"
+  # Default teacher/judge provider.
+  # Use "codex" for Codex CLI subscription auth.
+  # Change to "claude" only if Claude Code is installed and paid/enabled.
+  provider: "codex"
   daily_budget_usd: 9999.0
   hourly_budget_usd: 9999.0
   session_dir: "./data/opus_sessions"
-  model: "claude-opus-4-6"
-  model_reasoning_effort: "xhigh"
+  model: "gpt-5.6-sol"
+  model_reasoning_effort: "medium"
   default_max_turns: 10
   default_max_budget_per_call_usd: 0.50
+
+  # Optional Claude Code setting if provider is changed to "claude".
+  # model: "claude-opus-5"
+  # model_reasoning_effort: "high"
+
+codex:
+  enabled: true
+  model: "gpt-5.6-sol"
+  model_reasoning_effort: "medium"
+  training_data_review: true
+  curriculum_generation: true
+  failure_diagnostics: true
+  mutation_review: true
+  training_review_sample_size: 20
+  curriculum_batch_size: 5
+  curriculum_stagnation_gens: 5
 
 vram:
   total_gb: 32

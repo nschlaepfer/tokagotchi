@@ -1,6 +1,6 @@
 """Loop 1: Guided Evolution of Prompt Architectures (GEPA).
 
-Evolves PromptGenome configurations using Opus-driven mutation,
+Evolves PromptGenome configurations using teacher-driven mutation,
 multi-objective Pareto selection, and arena-based evaluation.
 
 Heavy imports (evaluate_genome, GEPAEngine, propose_mutation) are

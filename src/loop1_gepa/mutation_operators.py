@@ -1,6 +1,6 @@
-"""Opus-driven mutation operators for prompt genome evolution.
+"""Teacher-driven mutation operators for prompt genome evolution.
 
-Each mutation is proposed by Claude Opus based on failure analysis of
+Each mutation is proposed by the configured teacher based on failure analysis of
 evaluation results, then applied to produce a new PromptGenome.
 """
 
@@ -34,7 +34,7 @@ class MutationOperator(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# JSON schema for Opus structured output
+# JSON schema for teacher structured output
 # ---------------------------------------------------------------------------
 
 _MUTATION_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -94,7 +94,7 @@ def _build_mutation_prompt(
     *,
     required_type: MutationOperator | None = None,
 ) -> str:
-    """Construct the prompt sent to Opus for mutation proposal."""
+    """Construct the prompt sent to the teacher for mutation proposal."""
 
     # Compute action format diagnostics across ALL trajectories
     total_steps = 0
@@ -263,21 +263,21 @@ async def propose_mutation(
     eval_result: EvalResult,
     required_type: MutationOperator | None = None,
 ) -> tuple[MutationOperator, PromptGenome]:
-    """Use Opus to diagnose failures and propose a targeted genome mutation.
+    """Use the teacher to diagnose failures and propose a targeted genome mutation.
 
-    Sends the current genome and failure traces to Opus, which picks the
+    Sends the current genome and failure traces to the teacher, which picks the
     best mutation type and produces the mutated genome.
 
     Parameters
     ----------
     opus_client:
-        The Opus CLI client for making queries.
+        The configured teacher client.
     genome:
         The current prompt genome to mutate.
     eval_result:
         Evaluation results containing trajectories and failure patterns.
     required_type:
-        If set, forces Opus to use this specific mutation type instead
+        If set, forces the teacher to use this specific mutation type instead
         of choosing freely. Used to enforce mutation diversity.
 
     Returns
@@ -311,7 +311,7 @@ async def propose_mutation(
         opus_choice = data.get("mutation_type", "")
         if opus_choice != required_type.value:
             logger.info(
-                "Overriding Opus choice '%s' with forced type '%s'",
+                "Overriding teacher choice '%s' with forced type '%s'",
                 opus_choice,
                 required_type.value,
             )
@@ -327,7 +327,7 @@ async def propose_mutation(
             mutation_type = MutationOperator.REPHRASE_SECTION
 
     logger.info(
-        "Opus proposed mutation %s for genome %s: %s",
+        "Teacher proposed mutation %s for genome %s: %s",
         mutation_type.value,
         genome.genome_id,
         data.get("rationale", "")[:120],

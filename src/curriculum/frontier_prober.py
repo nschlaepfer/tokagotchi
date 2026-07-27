@@ -78,7 +78,7 @@ class FrontierProber:
     Parameters
     ----------
     opus_client:
-        OpusClient for generating probe tasks on the fly.
+        Teacher client for generating probe tasks on the fly.
     cache_ttl:
         Time-to-live in seconds for cached probe results.
     tolerance:

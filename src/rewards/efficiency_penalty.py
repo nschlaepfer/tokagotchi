@@ -1,4 +1,4 @@
-"""Local efficiency penalty -- no Opus calls required.
+"""Local efficiency penalty -- no teacher calls required.
 
 Detects wasteful patterns in an agent trajectory and returns a penalty
 value in [0.0, 0.3].  Higher values indicate more waste.

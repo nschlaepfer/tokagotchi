@@ -1,7 +1,7 @@
 """Implements the 80/20 mentored vs teacher-annotated split for on-policy distillation.
 
-In mentored mode, Qwen attempts tasks with Opus providing hints when stuck.
-In teacher-demo mode, Opus solves tasks outright as a demonstration.
+In mentored mode, Qwen attempts tasks with the configured teacher providing hints when stuck.
+In teacher-demo mode, the configured teacher solves tasks outright as a demonstration.
 Both modes generate SFT training examples.
 """
 
@@ -27,7 +27,7 @@ from src.config import Loop2Config
 
 logger = logging.getLogger(__name__)
 
-# How many steps without progress before Opus intervenes
+# How many steps without progress before the teacher intervenes
 _STUCK_THRESHOLD = 3
 
 # Maximum iterations per mentored episode
@@ -38,8 +38,8 @@ class MentorSession:
     """Manages mentored and teacher-demonstrated training example generation.
 
     Implements the 80/20 split: most tasks are attempted by Qwen with
-    Opus nudging when stuck, while a minority are solved entirely by
-    Opus as full demonstrations.
+    teacher nudging when stuck, while a minority are solved entirely by
+    the teacher as full demonstrations.
 
     Parameters
     ----------
@@ -62,10 +62,10 @@ class MentorSession:
         opus_client: OpusClient,
         genome: PromptGenome,
     ) -> tuple[Trajectory, list[dict[str, Any]]]:
-        """Run a mentored session: Qwen attempts the task with Opus hints when stuck.
+        """Run a mentored session: Qwen attempts the task with teacher hints when stuck.
 
         When Qwen makes no progress for ``_STUCK_THRESHOLD`` steps or
-        repeats the same action, Opus provides a nudge (not the full
+        repeats the same action, the teacher provides a nudge (not the full
         answer). Training examples are generated from the hint points
         showing the correct next action.
 
@@ -78,7 +78,7 @@ class MentorSession:
         arena_manager:
             DockerManager for container management.
         opus_client:
-            OpusClient for generating hints.
+            Teacher client for generating hints.
         genome:
             The PromptGenome providing the system prompt.
 
@@ -111,7 +111,7 @@ class MentorSession:
                 is_stuck = self._detect_stuck(recent_actions, recent_observations)
 
                 if is_stuck and hints_given < 5:
-                    # Generate a hint from Opus
+                    # Generate a hint from the teacher
                     hint = await self._generate_hint(
                         task, messages, opus_client,
                     )
@@ -186,17 +186,17 @@ class MentorSession:
         task: TaskSpec,
         opus_client: OpusClient,
     ) -> list[dict[str, Any]]:
-        """Have Opus solve a task completely, producing a full demonstration.
+        """Have the teacher solve a task completely, producing a full demonstration.
 
-        Opus generates a step-by-step solution trajectory which is then
+        The teacher generates a step-by-step solution trajectory which is then
         converted into a chat-format training example.
 
         Parameters
         ----------
         task:
-            The task for Opus to solve.
+            The task for the teacher to solve.
         opus_client:
-            OpusClient for the teacher demonstration.
+            Teacher client for the demonstration.
 
         Returns
         -------
@@ -299,7 +299,7 @@ class MentorSession:
         arena_manager:
             DockerManager for container management.
         opus_client:
-            OpusClient for hints and demonstrations.
+            Teacher client for hints and demonstrations.
         genome:
             PromptGenome for Qwen's system prompt.
 
@@ -408,7 +408,7 @@ class MentorSession:
         conversation: list[dict[str, str]],
         opus_client: OpusClient,
     ) -> str:
-        """Ask Opus for a hint (nudge, not a full answer).
+        """Ask the teacher for a hint (nudge, not a full answer).
 
         The hint guides Qwen toward the right approach without giving
         away the solution.

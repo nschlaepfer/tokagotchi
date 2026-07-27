@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CLI entry point for Loop 2 (on-policy distillation).
 
-Collects Qwen rollouts, runs Opus trace surgery on failures,
+Collects Qwen rollouts, runs teacher trace surgery on failures,
 accumulates corrected traces in the pending buffer, and triggers
 QLoRA SFT when the buffer meets readiness criteria.
 
@@ -217,7 +217,7 @@ async def main(args: argparse.Namespace) -> None:
         print(f"  Collection rounds:  {args.collect_rounds}")
         print(f"  Buffer size:        {pending_buffer.size}")
         print(f"  Training triggered: {should_train}")
-        print(f"  Opus spend:         ${budget['total_usd']:.2f}")
+        print(f"  Teacher spend:      ${budget['total_usd']:.2f}")
         print(f"  API calls:          {budget['num_calls']}")
         print("=" * 60)
 

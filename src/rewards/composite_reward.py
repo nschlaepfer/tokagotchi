@@ -41,7 +41,7 @@ class CompositeReward:
         Reward component weights.  Defaults to ``RewardWeights()`` which gives
         outcome=0.6, process=0.3, efficiency=0.1.
     sample_rate:
-        Probability of invoking the expensive Opus-based process reward on any
+        Probability of invoking the expensive teacher-based process reward on any
         given trajectory.  Defaults to 0.20 (20%).
     """
 
@@ -75,9 +75,9 @@ class CompositeReward:
         docker_manager:
             A :class:`DockerManager` instance for in-container verification.
         opus_client:
-            An :class:`OpusClient` for the (optional) process reward call.
+            A teacher client for the optional process reward call.
         use_process_reward:
-            If ``True``, the Opus-based process reward is computed regardless
+            If ``True``, the teacher-based process reward is computed regardless
             of the sampling rate.  If ``False``, the process reward is skipped
             and its contribution is zero.
 
@@ -146,7 +146,7 @@ class CompositeReward:
         """Randomly decide whether to invoke the process reward.
 
         Returns ``True`` with probability equal to ``self.sample_rate``.
-        This allows amortizing the cost of Opus calls across many trajectories.
+        This allows amortizing the cost of teacher calls across many trajectories.
 
         Returns
         -------

@@ -12,14 +12,19 @@ import yaml
 @dataclass
 class ModelConfig:
     # Ollama model for inference (Loop 1 rollouts, arena episodes)
-    name: str = "huihui_ai/qwen3.5-abliterated:9b"
-    quantization: str = ""  # Ollama handles quantization internally (Q4_K_M)
+    name: str = "qwen3.6:27b"
+    # Base Ollama model used when merging LoRA adapters back into GGUF.
+    # This stays stable even after the serving model switches to tokagotchi:latest.
+    base_ollama_model: str = "qwen3.6:27b"
+    quantization: str = "q4_k_m"  # Ollama handles quantization internally
     ollama_port: int = 11434
     ollama_host: str = "localhost"
     # HuggingFace model for training (Loop 2 SFT, Loop 3 RL)
-    hf_model_path: str = "models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated"
-    # Scale-up model (noted for later)
-    hf_model_path_27b: str = "huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated"
+    hf_model_path: str = "models/Qwen3.6-27B"
+    # Same local path kept for compatibility with earlier config references.
+    hf_model_path_27b: str = "models/Qwen3.6-27B"
+    # Larger sparse coding model for later scale-up on machines with enough headroom.
+    hf_model_path_35b_a3b: str = "models/Qwen3.6-35B-A3B"
     # Legacy vLLM fields (kept for backward compat)
     vllm_gpu_memory_utilization: float = 0.50
     vllm_port: int = 11434
@@ -28,12 +33,14 @@ class ModelConfig:
 
 @dataclass
 class OpusConfig:
-    provider: str = "claude"
+    # Kept as "OpusConfig" for backward compatibility with the existing loops.
+    # Runtime default is Codex; set provider="claude" to use Claude Code/Opus.
+    provider: str = "codex"
     daily_budget_usd: float = 50.0
     hourly_budget_usd: float = 10.0
     session_dir: str = "./data/opus_sessions"
-    model: str = "claude-opus-4-6"
-    model_reasoning_effort: str = "xhigh"
+    model: str = "gpt-5.6-sol"
+    model_reasoning_effort: str = "medium"
     default_max_turns: int = 10
     default_max_budget_per_call_usd: float = 0.50
 
@@ -148,8 +155,10 @@ class RewardWeights:
 
 @dataclass
 class CodexConfig:
-    """Configuration for Codex (GPT-5.4) integration gates."""
+    """Configuration for Codex (GPT-5.6 Sol) integration gates."""
     enabled: bool = True
+    model: str = "gpt-5.6-sol"
+    model_reasoning_effort: str = "medium"
     # Individual gate toggles
     training_data_review: bool = True
     curriculum_generation: bool = True

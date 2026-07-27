@@ -55,8 +55,8 @@ class SFTLauncher:
     ) -> str:
         """Run LoRA SFT on the provided training examples via Unsloth.
 
-        Uses Unsloth's FastModel which handles Qwen 3.5's Gated Delta
-        Networks natively on Windows without requiring triton/causal-conv1d.
+        Uses Unsloth's FastModel, which handles the Qwen 3.5/3.6 architecture
+        natively on Windows without requiring raw bitsandbytes loading.
         Loads in 4-bit (~8GB VRAM) leaving room for training.
 
         Parameters
@@ -96,7 +96,7 @@ class SFTLauncher:
         # 2. Load dataset
         dataset = self._load_dataset(data_path)
 
-        # 3. Load model via Unsloth FastModel (handles Qwen 3.5 natively)
+        # 3. Load model via Unsloth FastModel (handles Qwen 3.5/3.6 natively)
         logger.info("Loading model via Unsloth FastModel...")
         model, processor = FastModel.from_pretrained(
             model_name=base_model_path,
@@ -104,7 +104,7 @@ class SFTLauncher:
             load_in_4bit=True,
         )
 
-        # Extract text tokenizer from processor (Qwen 3.5 is multimodal)
+        # Extract text tokenizer from processor (Qwen3.6 is multimodal)
         tokenizer = (
             processor.tokenizer if hasattr(processor, "tokenizer") else processor
         )
@@ -272,6 +272,7 @@ class SFTLauncher:
         base_model_path: str,
         adapter_path: str,
         ollama_model_name: str = "tokagotchi:latest",
+        ollama_base_model: str = "qwen3.6:27b",
         quantization: str = "q4_k_m",
     ) -> str:
         """Merge LoRA adapter, convert to GGUF, and import into Ollama.
@@ -288,6 +289,8 @@ class SFTLauncher:
             Path to the saved LoRA adapter directory.
         ollama_model_name:
             Name for the Ollama model (e.g. "tokagotchi:latest").
+        ollama_base_model:
+            Base Ollama model whose GGUF will receive the LoRA adapter.
         quantization:
             GGUF quantization method (q4_k_m, q8_0, f16).
 
@@ -316,7 +319,7 @@ class SFTLauncher:
             sys.executable, str(export_script),
             "--base-model", str(Path(base_model_path).resolve()),
             "--adapter", str(Path(adapter_path).resolve()),
-            "--ollama-base", "huihui_ai/qwen3.5-abliterated:9b",
+            "--ollama-base", ollama_base_model,
             "--ollama-tag", ollama_model_name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -343,6 +346,7 @@ class SFTLauncher:
         config: Loop2Config,
         base_model_path: str,
         ollama_model_name: str = "tokagotchi:latest",
+        ollama_base_model: str = "qwen3.6:27b",
         quantization: str = "q4_k_m",
     ) -> tuple[str, str]:
         """Train LoRA then export to Ollama in one pass (saves a model reload).
@@ -359,6 +363,7 @@ class SFTLauncher:
             base_model_path=base_model_path,
             adapter_path=adapter_path,
             ollama_model_name=ollama_model_name,
+            ollama_base_model=ollama_base_model,
             quantization=quantization,
         )
         return adapter_path, ollama_name

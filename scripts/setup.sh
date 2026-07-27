@@ -50,10 +50,11 @@ info "Installing qwen-self-improve with all extras..."
 info "Package installation complete"
 
 # ------------------------------------------------------------------
-# 3. Download Qwen 3.5 27B (AWQ quantised)
+# 3. Download Qwen3.6 27B and pull the Ollama serving tag
 # ------------------------------------------------------------------
-MODEL_ID="Qwen/Qwen3.5-27B-AWQ"
-MODEL_DIR="./models/Qwen3.5-27B-AWQ"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3.6-27B}"
+MODEL_DIR="${MODEL_DIR:-./models/Qwen3.6-27B}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3.6:27b}"
 
 if [ -d "$MODEL_DIR" ] && [ "$(ls -A "$MODEL_DIR" 2>/dev/null)" ]; then
     info "Model already downloaded at $MODEL_DIR — skipping"
@@ -67,16 +68,23 @@ else
     fi
 fi
 
+if command -v ollama &>/dev/null; then
+    info "Pulling Ollama model $OLLAMA_MODEL ..."
+    ollama pull "$OLLAMA_MODEL"
+else
+    warn "ollama not found. Install Ollama, then run: ollama pull $OLLAMA_MODEL"
+fi
+
 # ------------------------------------------------------------------
 # 4. Build Docker arena image
 # ------------------------------------------------------------------
 info "Building Docker arena image..."
 if command -v docker &>/dev/null; then
-    if [ -f "docker/Dockerfile" ]; then
-        docker build -t qwen-arena:latest -f docker/Dockerfile docker/
+    if [ -f "docker/Dockerfile.arena" ]; then
+        docker build -t qwen-arena:latest -f docker/Dockerfile.arena docker/
         info "Docker image qwen-arena:latest built"
     else
-        warn "docker/Dockerfile not found — skipping Docker build"
+        warn "docker/Dockerfile.arena not found — skipping Docker build"
     fi
 else
     warn "Docker not found — skipping arena image build"

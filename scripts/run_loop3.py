@@ -143,7 +143,7 @@ async def main(args: argparse.Namespace) -> None:
             print(f"  Result: {result}")
 
         budget = budget_tracker.get_summary()
-        print(f"\n  Opus spend: ${budget['total_usd']:.2f}")
+        print(f"\n  Teacher spend: ${budget['total_usd']:.2f}")
         print(f"  API calls:  {budget['num_calls']}")
         print("=" * 60)
 

@@ -1,4 +1,4 @@
-"""Budget tracker with circuit breakers for Opus API spend.
+"""Budget tracker with circuit breakers for teacher-model spend.
 
 Tracks cumulative spend per hour, per day, and per loop iteration.
 Thread-safe and persists state to disk as JSON.

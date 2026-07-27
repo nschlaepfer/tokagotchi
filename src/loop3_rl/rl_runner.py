@@ -241,7 +241,7 @@ class RLRunner:
         arena_manager:
             DockerManager for sandboxed execution.
         opus_client:
-            OpusClient for process reward sampling.
+            Teacher client for process reward sampling.
         curriculum_engine:
             SECEngine for task sampling.
 

@@ -8,7 +8,7 @@ Pipeline:
 
 Usage:
   python scripts/convert_to_ollama.py \
-    --base-model models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated \
+    --base-model models/Qwen3.6-27B \
     --adapter-path data/checkpoints/adapter_500ex \
     --output-tag tokagotchi-v1 \
     --quantization q4_k_m

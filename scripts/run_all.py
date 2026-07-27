@@ -73,8 +73,10 @@ async def main(args: argparse.Namespace) -> None:
 
     logger.info("Starting Qwen self-improvement pipeline")
     logger.info(
-        "Config: model=%s, budget=$%.0f/day, loop3=%02d:00-%02d:00",
+        "Config: student=%s, teacher=%s/%s, budget=$%.0f/day, loop3=%02d:00-%02d:00",
         cfg.model.name,
+        cfg.opus.provider,
+        cfg.opus.model,
         cfg.opus.daily_budget_usd,
         cfg.schedule.loop3_start_hour,
         cfg.schedule.loop3_end_hour,

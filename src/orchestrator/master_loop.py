@@ -79,11 +79,15 @@ class MasterLoop:
         self.experiment_git: ExperimentGit | None = None
         self.eval_harness: EvalHarness | None = None
 
-        # Codex bridge for offloading diagnosis/review to GPT-5.4
+        # Codex bridge for offloading diagnosis/review to GPT-5.6 Sol
         self._codex: Any | None = None
         try:
             from src.infra.codex_bridge import CodexBridge
-            self._codex = CodexBridge(cwd=Path(config.data_dir).parent)
+            self._codex = CodexBridge(
+                cwd=Path(config.data_dir).parent,
+                model=config.codex.model,
+                effort=config.codex.model_reasoning_effort,
+            )
         except Exception:
             pass
 
@@ -179,7 +183,7 @@ class MasterLoop:
             persist_path=data_dir / "budget_state.json",
         )
 
-        # Opus client
+        # Teacher client (Codex by default, Claude optional)
         self.opus_client = OpusClient(
             config=cfg.opus,
             budget_tracker=self.budget_tracker,
@@ -384,6 +388,7 @@ class MasterLoop:
                                 base_model_path=hf_model,
                                 adapter_path=checkpoint_path,
                                 ollama_model_name="tokagotchi:latest",
+                                ollama_base_model=self.config.model.base_ollama_model,
                                 quantization="q4_k_m",
                             )
                             self.config.model.name = ollama_name
@@ -569,7 +574,7 @@ class MasterLoop:
             len(trajectories), len(trajectories) - len(failed), len(failed),
         )
 
-        # Process failed trajectories: SDPO first (free), Opus fallback (costly)
+        # Process failed trajectories: SDPO first (free), teacher fallback when needed
         for traj in failed:
                 # SDPO: self-distillation using Qwen's own re-evaluation
                 pairs: list = []
@@ -605,7 +610,7 @@ class MasterLoop:
                     except Exception:
                         logger.exception("SDPO re-evaluation failed")
 
-                # Opus fallback: only if SDPO produced nothing
+                # Teacher fallback: only if SDPO produced nothing
                 if not pairs:
                     try:
                         analysis = await self.opus_client.correct_trace(traj)
@@ -623,18 +628,18 @@ class MasterLoop:
                                     example=ex,
                                     metadata={
                                         "task_type": task_type,
-                                        "failure_mode": "opus_corrected",
-                                        "source": "opus",
+                                        "failure_mode": "teacher_corrected",
+                                        "source": self.config.opus.provider,
                                         "difficulty": traj.task.difficulty if traj.task else 0.5,
                                     },
                                 )
                                 logger.info(
-                                    "Opus: corrected trajectory %s (%d steps)",
+                                    "Teacher: corrected trajectory %s (%d steps)",
                                     traj.trajectory_id[:12],
                                     len(analysis.corrected_steps),
                                 )
                     except Exception:
-                        logger.exception("Opus trace surgery failed")
+                        logger.exception("Teacher trace surgery failed")
 
     # ------------------------------------------------------------------
     # Loop 3: Overnight RL

@@ -13,9 +13,16 @@ import tarfile
 from dataclasses import dataclass, field
 from typing import Any
 
-import docker
-from docker.errors import APIError, NotFound
-from docker.models.containers import Container
+try:
+    import docker
+    from docker.errors import APIError, NotFound
+    from docker.models.containers import Container
+    _DOCKER_IMPORT_ERROR: Exception | None = None
+except Exception as exc:  # Docker SDK is optional when using subprocess arena.
+    docker = None  # type: ignore[assignment]
+    APIError = NotFound = Exception  # type: ignore[misc,assignment]
+    Container = Any  # type: ignore[misc,assignment]
+    _DOCKER_IMPORT_ERROR = exc
 
 from src.models import TaskSpec
 
@@ -77,8 +84,13 @@ class DockerManager:
         image: str = ARENA_IMAGE,
         pool_size: int = DEFAULT_POOL_SIZE,
         default_timeout: int = DEFAULT_EXEC_TIMEOUT,
-        docker_client: docker.DockerClient | None = None,
+        docker_client: Any | None = None,
     ) -> None:
+        if docker is None:
+            raise RuntimeError(
+                "Docker SDK is not installed. Install the project dependencies "
+                "or use the subprocess arena backend."
+            ) from _DOCKER_IMPORT_ERROR
         self.image = image
         self.default_timeout = default_timeout
         self.client = docker_client or docker.from_env()
@@ -321,6 +333,8 @@ def create_arena_manager(use_docker: bool = None) -> "DockerManager | Subprocess
     if use_docker is None:
         # Auto-detect: ping AND try to list containers (catches credential errors)
         try:
+            if docker is None:
+                raise RuntimeError("Docker SDK is not installed")
             import docker as _docker
             client = _docker.from_env()
             client.ping()

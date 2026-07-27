@@ -10,7 +10,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--base-model", required=True)
     p.add_argument("--adapter", required=True)
-    p.add_argument("--ollama-base", default="huihui_ai/qwen3.5-abliterated:9b")
+    p.add_argument("--ollama-base", default="qwen3.6:27b")
     p.add_argument("--ollama-tag", default="tokagotchi:latest")
     p.add_argument("--output-dir", default="C:/temp/tokagotchi_gguf")
     p.add_argument("--quantization", default="q4_k_m")

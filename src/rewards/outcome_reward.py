@@ -1,4 +1,4 @@
-"""Automated, verifiable outcome reward -- no Opus calls required.
+"""Automated, verifiable outcome reward -- no teacher calls required.
 
 Computes a scalar reward in [0.0, 1.0] by running task-specific verification
 logic inside the Docker container or by comparing submitted answers.

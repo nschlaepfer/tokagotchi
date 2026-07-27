@@ -1,4 +1,4 @@
-"""Orchestrator modules for Opus-driven self-improvement loops."""
+"""Orchestrator modules for teacher-driven self-improvement loops."""
 
 
 def __getattr__(name: str):

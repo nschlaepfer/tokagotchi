@@ -1,6 +1,6 @@
-"""Opus-powered task generation.
+"""Teacher-powered task generation.
 
-Uses the OpusClient to generate new evaluation tasks, adversarial
+Uses the configured teacher client to generate new evaluation tasks, adversarial
 trap tasks targeting known weaknesses, and difficulty gradients
 for systematic capability probing.
 """
@@ -31,12 +31,12 @@ _DIMENSION_TO_TYPE: dict[str, str] = {
 
 
 class TaskGenerator:
-    """Generates evaluation tasks via Opus.
+    """Generates evaluation tasks via the configured teacher.
 
     Parameters
     ----------
     opus_client:
-        An OpusClient instance for calling Opus.
+        A teacher client instance.
     """
 
     def __init__(self, opus_client: OpusClient) -> None:
@@ -59,7 +59,7 @@ class TaskGenerator:
             overall. Used to identify areas needing improvement.
         focus_type:
             Optional TaskType value to focus generation on. If None,
-            Opus decides the mix based on the profile.
+            The teacher decides the mix based on the profile.
 
         Returns
         -------
@@ -322,7 +322,7 @@ class TaskGenerator:
 
     @staticmethod
     def _parse_task(data: dict[str, Any]) -> TaskSpec:
-        """Parse a task dict from Opus output into a TaskSpec."""
+        """Parse a task dict from teacher output into a TaskSpec."""
         raw_type = data.get("task_type", "code_debugging")
         try:
             task_type = TaskType(raw_type)

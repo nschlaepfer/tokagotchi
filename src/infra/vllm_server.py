@@ -185,10 +185,10 @@ class LLMServer:
         Parameters
         ----------
         think:
-            If True (default), enables Qwen 3.5's thinking mode. The model
+            If True (default), enables Qwen-style thinking mode. The model
             puts reasoning in the ``thinking`` field and the action in
-            ``content``. This is REQUIRED for qwen3.5-abliterated which
-            cannot produce content without thinking first.
+            ``content``. This is required for some thinking-first variants
+            that cannot produce content without reasoning first.
         """
         self._ensure_ready()
 
@@ -450,9 +450,9 @@ VLLMServer = LLMServer
 
 
 def _fix_thinking_response(response: openai.types.chat.ChatCompletion) -> None:
-    """Fix responses from thinking models (Qwen 3.5) where content is empty.
+    """Fix responses from thinking models where content is empty.
 
-    When Qwen 3.5 uses thinking mode via the OpenAI-compatible API, the actual
+    When Qwen-style models use thinking mode via the OpenAI-compatible API, the actual
     response text goes into the ``reasoning`` field and ``content`` is empty.
     This function moves reasoning into content when content is empty.
     """

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke test: verify model loads in 4-bit + LoRA trains on RTX 5090.
+"""Smoke test: verify the supported Unsloth 4-bit + LoRA path on RTX 5090.
 
 This is the critical path test for Loops 2 and 3. If this passes,
 the full SFT and RL pipelines will work with the real model.
@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def test_4bit_load_and_train(model_path: str) -> None:
     import torch
+    from unsloth import FastModel
 
     print(f"PyTorch: {torch.__version__}")
     print(f"CUDA: {torch.cuda.is_available()}")
@@ -31,29 +32,18 @@ def test_4bit_load_and_train(model_path: str) -> None:
 
     # ---- Step 1: Load in 4-bit ----
     print("=" * 50)
-    print("STEP 1: Loading model in 4-bit NF4")
+    print("STEP 1: Loading model in 4-bit via Unsloth FastModel")
     print("=" * 50)
     t0 = time.time()
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    model, processor = FastModel.from_pretrained(
+        model_name=model_path,
+        max_seq_length=2048,
+        load_in_4bit=True,
+    )
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-    )
 
     load_time = time.time() - t0
     vram_model = torch.cuda.memory_allocated() / 1e9
@@ -67,20 +57,16 @@ def test_4bit_load_and_train(model_path: str) -> None:
     print("STEP 2: Applying LoRA (r=64, all projection layers)")
     print("=" * 50)
 
-    from peft import LoraConfig, TaskType, get_peft_model
-
-    lora_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
+    peft_model = FastModel.get_peft_model(
+        model,
         r=64,
         lora_alpha=32,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
-        lora_dropout=0.05,
-        bias="none",
+        lora_dropout=0.0,
     )
-
-    peft_model = get_peft_model(model, lora_config)
-    peft_model.print_trainable_parameters()
+    if hasattr(peft_model, "print_trainable_parameters"):
+        peft_model.print_trainable_parameters()
 
     vram_lora = torch.cuda.memory_allocated() / 1e9
     print(f"  VRAM (model + LoRA): {vram_lora:.2f} GB")
@@ -105,7 +91,9 @@ def test_4bit_load_and_train(model_path: str) -> None:
         padding=True,
         truncation=True,
         max_length=512,
-    ).to(model.device)
+    )
+    device = next(peft_model.parameters()).device
+    inputs = {key: value.to(device) for key, value in inputs.items()}
 
     t0 = time.time()
     outputs = peft_model(**inputs, labels=inputs["input_ids"])
@@ -150,7 +138,8 @@ def test_4bit_load_and_train(model_path: str) -> None:
     print("=" * 50)
 
     peft_model.eval()
-    gen_input = tokenizer("What is 2+2?", return_tensors="pt").to(model.device)
+    gen_input = tokenizer("What is 2+2?", return_tensors="pt")
+    gen_input = {key: value.to(device) for key, value in gen_input.items()}
     with torch.no_grad():
         gen_output = peft_model.generate(
             **gen_input,
@@ -182,7 +171,7 @@ def test_4bit_load_and_train(model_path: str) -> None:
     print()
 
     # ---- Cleanup ----
-    del peft_model, model, optimizer
+    del peft_model, model, processor, optimizer
     torch.cuda.empty_cache()
 
     # ---- Summary ----
@@ -215,14 +204,14 @@ def main():
         "--model-path",
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "models", "Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated",
+            "models", "Qwen3.6-27B",
         ),
     )
     args = parser.parse_args()
 
     if not os.path.exists(args.model_path):
         print(f"ERROR: Model not found at {args.model_path}")
-        print("Download it first: huggingface-cli download huihui-ai/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated")
+        print("Download it first: huggingface-cli download Qwen/Qwen3.6-27B --local-dir models/Qwen3.6-27B")
         sys.exit(1)
 
     test_4bit_load_and_train(args.model_path)

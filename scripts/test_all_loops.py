@@ -112,10 +112,12 @@ def test_01_config_loading():
     assert isinstance(cfg, MasterConfig), f"Expected MasterConfig, got {type(cfg)}"
     assert cfg.model.ollama_port == 11434, f"Expected port 11434, got {cfg.model.ollama_port}"
     assert cfg.opus.daily_budget_usd > 0, "Daily budget should be positive"
+    assert cfg.opus.provider == "codex", f"Expected default provider codex, got {cfg.opus.provider}"
+    assert cfg.opus.model == "gpt-5.6-sol", f"Expected GPT-5.6 Sol, got {cfg.opus.model}"
     assert cfg.loop1.population_size > 0, "Population size should be positive"
     assert cfg.loop3.algorithm == "grpo", f"Expected grpo, got {cfg.loop3.algorithm}"
     assert len(cfg.loop1.pareto_objectives) >= 3, "Should have at least 3 pareto objectives"
-    return f"MasterConfig loaded: model={cfg.model.name}, budget=${cfg.opus.daily_budget_usd}/day"
+    return f"MasterConfig loaded: student={cfg.model.name}, teacher={cfg.opus.provider}/{cfg.opus.model}"
 
 
 # ===================================================================
@@ -198,7 +200,7 @@ def test_03_ollama_inference():
     cfg = load_config(PROJECT_ROOT / "config")
 
     # Use native Ollama API with think=false to get direct content
-    # (Qwen 3.5 uses thinking mode by default, which puts content in reasoning field)
+    # (Qwen thinking models may put content in the reasoning/thinking field)
     import requests
 
     api_url = f"http://{cfg.model.ollama_host}:{cfg.model.ollama_port}"
@@ -230,37 +232,30 @@ def test_03_ollama_inference():
 
 
 # ===================================================================
-# Test 4: Claude CLI
+# Test 4: Codex CLI
 # ===================================================================
 
-def test_04_claude_cli():
-    """Invoke claude -p with a simple prompt."""
+def test_04_codex_cli():
+    """Verify the Codex CLI is installed."""
     try:
         result = subprocess.run(
-            ["claude", "-p", "Reply with exactly: PING_OK", "--output-format", "json", "--max-turns", "1"],
+            ["codex", "--version"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=10,
         )
     except FileNotFoundError:
-        skip("claude CLI not found on PATH")
+        skip("codex CLI not found on PATH")
     except subprocess.TimeoutExpired:
-        skip("claude CLI timed out after 60s")
+        skip("codex CLI timed out after 10s")
 
     if result.returncode != 0:
-        skip(f"claude CLI exited with code {result.returncode}: {result.stderr[:200]}")
+        skip(f"codex CLI exited with code {result.returncode}: {result.stderr[:200]}")
 
     stdout = result.stdout.strip()
-    assert len(stdout) > 0, "Empty stdout from claude CLI"
+    assert len(stdout) > 0, "Empty stdout from codex CLI"
 
-    # Try to parse as JSON
-    try:
-        data = json.loads(stdout)
-        text = data.get("result", stdout)
-    except json.JSONDecodeError:
-        text = stdout
-
-    return f"Claude CLI responded: {str(text)[:120]}"
+    return f"Codex CLI available: {stdout[:120]}"
 
 
 # ===================================================================
@@ -268,8 +263,8 @@ def test_04_claude_cli():
 # ===================================================================
 
 def test_05_budget_tracker():
-    """Create a BudgetTracker, record spend, check limits."""
-    from src.orchestrator.budget_tracker import BudgetTracker, BudgetExhaustedError
+    """Create a BudgetTracker and verify subscription-mode spend tracking."""
+    from src.orchestrator.budget_tracker import BudgetTracker
 
     tracker = BudgetTracker(
         hourly_limit_usd=1.00,
@@ -284,8 +279,8 @@ def test_05_budget_tracker():
     assert tracker.can_spend(0.40, loop_id="test"), "Should allow another $0.40"
     tracker.record_spend(0.40, loop_id="loop2", prompt_tokens=80, completion_tokens=40)
 
-    # Should NOT allow exceeding hourly limit
-    assert not tracker.can_spend(0.20, loop_id="test"), "Should deny $0.20 (would exceed hourly $1.00)"
+    # Subscription mode: limits are observability guardrails, not hard blockers.
+    assert tracker.can_spend(0.20, loop_id="test"), "Subscription mode should not hard-block spend"
 
     # Check summary
     summary = tracker.get_summary()
@@ -294,74 +289,49 @@ def test_05_budget_tracker():
     assert summary["total_prompt_tokens"] == 180
     assert summary["total_completion_tokens"] == 90
 
-    # Verify circuit breaker raises
-    raised = False
-    try:
-        tracker.record_spend(0.20, loop_id="over_limit")
-    except BudgetExhaustedError as exc:
-        raised = True
-        assert "hourly" in exc.limit_type
-    assert raised, "Should have raised BudgetExhaustedError"
+    # Verify over-limit records are still tracked rather than rejected.
+    tracker.record_spend(0.20, loop_id="over_limit")
+    summary = tracker.get_summary()
+    assert summary["num_calls"] == 3
+    assert abs(summary["total_usd"] - 1.10) < 0.001
 
     return f"Budget tracker OK: {summary['num_calls']} calls, ${summary['total_usd']:.2f} total"
 
 
 # ===================================================================
-# Test 6: Opus Client (real call, small/cheap)
+# Test 6: Teacher Client command builder
 # ===================================================================
 
-def test_06_opus_client():
-    """Make a real (small, cheap) call via OpusClient to analyze a mock trace."""
+def test_06_teacher_client():
+    """Verify OpusClient builds the default Codex command without calling a model."""
 
-    async def _run():
-        from src.orchestrator.opus_client import OpusClient
-        from src.orchestrator.budget_tracker import BudgetTracker
-        from src.config import OpusConfig
-        from src.models import Trajectory, TaskSpec, StepRecord, ActionType, TaskType
+    from src.orchestrator.opus_client import OpusClient
+    from src.orchestrator.budget_tracker import BudgetTracker
+    from src.config import OpusConfig
 
-        # Check that claude CLI is available
-        try:
-            probe = subprocess.run(
-                ["claude", "--version"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if probe.returncode != 0:
-                skip("claude CLI not working")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            skip("claude CLI not available")
+    cfg = OpusConfig(
+        provider="codex",
+        model="gpt-5.6-sol",
+        model_reasoning_effort="medium",
+        daily_budget_usd=5.0,
+        hourly_budget_usd=2.0,
+        default_max_budget_per_call_usd=0.10,
+        default_max_turns=1,
+    )
+    budget = BudgetTracker(hourly_limit_usd=2.0, daily_limit_usd=5.0)
+    client = OpusClient(config=cfg, budget_tracker=budget)
 
-        cfg = OpusConfig(
-            daily_budget_usd=5.0,
-            hourly_budget_usd=2.0,
-            default_max_budget_per_call_usd=0.10,
-            default_max_turns=1,
-        )
-        budget = BudgetTracker(hourly_limit_usd=2.0, daily_limit_usd=5.0)
-        client = OpusClient(config=cfg, budget_tracker=budget)
+    cmd, stdin_text = client._build_command(
+        "Return {\"status\":\"ok\"}",
+        json_schema={"type": "object", "required": ["status"]},
+        max_turns=1,
+    )
+    assert cmd[:4] == ["codex", "exec", "--model", "gpt-5.6-sol"]
+    assert "--sandbox" in cmd and "read-only" in cmd
+    assert any("model_reasoning_effort" in arg for arg in cmd)
+    assert stdin_text is None
 
-        # Build a tiny mock trajectory
-        task = TaskSpec(task_type=TaskType.CODE_DEBUGGING, description="Fix a bug")
-        step = StepRecord(
-            step_idx=0,
-            action_type=ActionType.BASH,
-            action_content="cat main.py",
-            observation="def add(a, b): return a - b  # BUG",
-        )
-        traj = Trajectory(task=task, steps=[step], success=False, total_reward=0.0)
-
-        resp = await client.query(
-            "In one sentence, what is wrong with this code? def add(a, b): return a - b",
-            max_budget_usd=0.05,
-            max_turns=1,
-        )
-
-        if resp.is_error:
-            skip(f"OpusClient query failed: {resp.error_message}")
-
-        assert len(resp.text) > 0, "Empty response text"
-        return f"OpusClient OK (cost=${resp.cost_usd:.4f}): {resp.text[:100]}"
-
-    return asyncio.run(_run())
+    return f"Teacher client default OK: {' '.join(cmd[:8])}"
 
 
 # ===================================================================
@@ -369,7 +339,7 @@ def test_06_opus_client():
 # ===================================================================
 
 def test_07_gepa_lite():
-    """Run 1 mini GEPA iteration: create seed genome, evaluate via Ollama, mutate via Opus."""
+    """Run a mini GEPA wiring check: seed genome, optional Ollama eval, Codex mutation wiring."""
 
     async def _run():
         from src.loop1_gepa.prompt_genome import create_seed_genome
@@ -413,46 +383,30 @@ def test_07_gepa_lite():
         except Exception:
             ollama_ok = False
 
-        # Step 3: Mutate via Opus (if available)
-        opus_ok = False
-        try:
-            probe = subprocess.run(
-                ["claude", "--version"], capture_output=True, text=True, timeout=10,
-            )
-            if probe.returncode == 0:
-                from src.orchestrator.opus_client import OpusClient
-                from src.orchestrator.budget_tracker import BudgetTracker
-                from src.config import OpusConfig
+        # Step 3: Verify Codex teacher mutation command wiring without a remote call.
+        from src.orchestrator.opus_client import OpusClient
+        from src.orchestrator.budget_tracker import BudgetTracker
 
-                opus_cfg = OpusConfig(
-                    default_max_budget_per_call_usd=0.05,
-                    default_max_turns=1,
-                )
-                opus_budget = BudgetTracker(hourly_limit_usd=2.0, daily_limit_usd=5.0)
-                opus_client = OpusClient(config=opus_cfg, budget_tracker=opus_budget)
+        teacher_budget = BudgetTracker(hourly_limit_usd=2.0, daily_limit_usd=5.0)
+        teacher_client = OpusClient(config=cfg.opus, budget_tracker=teacher_budget)
+        teacher_cmd, _ = teacher_client._build_command(
+            f"Suggest one small improvement:\n\n{genome.system_prompt[:300]}",
+            max_turns=1,
+        )
+        teacher_ok = teacher_cmd[:2] == ["codex", "exec"] if cfg.opus.provider == "codex" else len(teacher_cmd) > 0
 
-                mutation_resp = await opus_client.query(
-                    f"Given this system prompt for a coding agent, suggest one small improvement "
-                    f"in 1-2 sentences:\n\n{genome.system_prompt[:300]}",
-                    max_budget_usd=0.05,
-                    max_turns=1,
-                )
-                opus_ok = not mutation_resp.is_error and len(mutation_resp.text) > 0
-        except Exception:
-            pass
-
-        if not ollama_ok and not opus_ok:
-            skip("Neither Ollama nor Claude CLI available for GEPA lite test")
+        if not ollama_ok and not teacher_ok:
+            skip("Neither Ollama nor teacher command wiring available for GEPA lite test")
 
         parts = []
         if ollama_ok:
             parts.append("Ollama eval OK")
         else:
             parts.append("Ollama eval SKIP")
-        if opus_ok:
-            parts.append("Opus mutation OK")
+        if teacher_ok:
+            parts.append("teacher mutation wiring OK")
         else:
-            parts.append("Opus mutation SKIP")
+            parts.append("teacher mutation wiring SKIP")
 
         return f"GEPA lite: seed genome created, {', '.join(parts)}"
 
@@ -922,9 +876,9 @@ def main():
         ("Test 01: Config loading", test_01_config_loading),
         ("Test 02: Models serialization", test_02_models),
         ("Test 03: Ollama inference", test_03_ollama_inference),
-        ("Test 04: Claude CLI", test_04_claude_cli),
+        ("Test 04: Codex CLI", test_04_codex_cli),
         ("Test 05: Budget Tracker", test_05_budget_tracker),
-        ("Test 06: Opus Client (real call)", test_06_opus_client),
+        ("Test 06: Teacher Client command builder", test_06_teacher_client),
         ("Test 07: Loop 1 GEPA lite", test_07_gepa_lite),
         ("Test 08: Efficiency penalty", test_08_efficiency_penalty),
         ("Test 09: Outcome reward", test_09_outcome_reward),

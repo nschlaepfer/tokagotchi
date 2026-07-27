@@ -1,7 +1,7 @@
 """Meta-Harness style filesystem-based trace store.
 
 Logs every pipeline action as structured JSON/JSONL so that both
-Codex (GPT-5.4) and Opus (Claude) can read historical traces for
+Codex (GPT-5.6 Sol) and optional Claude can read historical traces for
 causal reasoning over prior failures.
 
 Reference: Meta-Harness (arxiv 2603.28052) — "the main advantage is
@@ -163,7 +163,7 @@ class TraceStore:
         )
 
     # ------------------------------------------------------------------
-    # Retrieval (for Codex/Opus context injection)
+    # Retrieval (for teacher context injection)
     # ------------------------------------------------------------------
 
     def get_recent_traces(self, category: str, n: int = 5) -> list[dict[str, Any]]:
@@ -197,7 +197,7 @@ class TraceStore:
         """Aggregate failure patterns from recent Loop 1 eval traces.
 
         Returns a compressed summary string suitable for injection
-        into Codex/Opus prompts.
+        into teacher prompts.
         """
         loop1_dir = self.base / "loop1"
         if not loop1_dir.exists():

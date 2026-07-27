@@ -1,6 +1,6 @@
 """Main GEPA evolutionary loop for prompt genome optimization.
 
-Orchestrates the iterative cycle of parent selection, Opus-driven mutation,
+Orchestrates the iterative cycle of parent selection, teacher-driven mutation,
 genome evaluation, and Pareto frontier updates. Supports concurrent
 evaluations and budget-aware rate limiting.
 """
@@ -71,7 +71,7 @@ class GEPAEngine:
 
     Runs an iterative loop:
     1. Select parents from the Pareto frontier.
-    2. Propose mutations via Opus (with failure trace analysis).
+    2. Propose mutations via the configured teacher (with failure trace analysis).
     3. Optionally perform crossover between frontier members.
     4. Evaluate mutated/crossed genomes against the task set.
     5. Update the Pareto frontier.
@@ -82,7 +82,7 @@ class GEPAEngine:
     config:
         Master configuration (uses config.loop1 for GEPA-specific settings).
     opus_client:
-        Client for Opus-driven mutation proposals.
+        Client for teacher-driven mutation proposals.
     vllm_server:
         vLLM server for Qwen inference during evaluation.
     arena_manager:
@@ -118,7 +118,7 @@ class GEPAEngine:
         self.generation: int = 0
         self.history: list[IterationRecord] = []
 
-        # Rate limiting: track Opus calls per hour
+        # Rate limiting: track teacher calls per hour
         self._opus_call_timestamps: list[float] = []
 
         # Mutation diversity: cycle through high-impact types
@@ -225,7 +225,7 @@ class GEPAEngine:
                         min(n_parents, len(self.population)),
                     )
 
-                # --- Step 2: Propose mutations via Opus ---
+                # --- Step 2: Propose mutations via the teacher ---
                 offspring = await self._propose_mutations(parents, record)
 
                 # --- Step 3: Crossover (optional) ---
@@ -327,7 +327,7 @@ class GEPAEngine:
         parents: list[PromptGenome],
         record: IterationRecord,
     ) -> list[PromptGenome]:
-        """Propose mutations for each parent genome via Opus.
+        """Propose mutations for each parent genome via the configured teacher.
 
         Uses concurrent calls with rate limiting.
         """
@@ -347,7 +347,7 @@ class GEPAEngine:
             self._mutation_cycle_idx += 1
 
         # Run mutation proposals concurrently with a semaphore
-        semaphore = asyncio.Semaphore(3)  # Max 3 concurrent Opus calls
+        semaphore = asyncio.Semaphore(3)  # Max 3 concurrent teacher calls
 
         async def _mutate_one(
             parent: PromptGenome,
@@ -567,7 +567,7 @@ class GEPAEngine:
     # ------------------------------------------------------------------
 
     async def _rate_limit(self) -> None:
-        """Enforce Opus call rate limits (experiments_per_hour).
+        """Enforce teacher call rate limits (experiments_per_hour).
 
         Sleeps if the current rate would exceed the configured limit.
         """

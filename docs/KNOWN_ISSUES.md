@@ -1,19 +1,21 @@
 # Known Issues & Workarounds
 
-## bitsandbytes 4-bit Segfault on Qwen 3.5
+## bitsandbytes 4-bit Segfault on Qwen 3.5 / Qwen3.6-family training
 
-**Status**: RESOLVED via Unsloth
+**Status**: Mitigated via Unsloth; raw bitsandbytes is disabled by default
 **Affected**: QLoRA training (Loop 2 SFT, Loop 3 RL)
 **Date**: March 29, 2026
 **Resolution Date**: March 29, 2026
 
 ### Problem
 
-Loading Qwen 3.5 (9B or 27B) with `BitsAndBytesConfig(load_in_4bit=True)` causes a segmentation fault during model weight loading. The crash happens deep in the CUDA quantization kernels.
+Loading Qwen 3.5 (9B or 27B) with `BitsAndBytesConfig(load_in_4bit=True)` caused a segmentation fault during model weight loading. The crash happened deep in the CUDA quantization kernels.
+
+The current default is Qwen3.6 27B. Keep the Unsloth path for Qwen3.6 unless raw bitsandbytes 4-bit loading has been explicitly revalidated on the target driver/CUDA stack. Do not "fix" this by switching training back to raw `BitsAndBytesConfig(load_in_4bit=True)`.
 
 ### Root Cause
 
-Qwen 3.5 uses **Gated Delta Networks** (linear attention layers) which are not fully supported by bitsandbytes 0.49.x 4-bit quantization. The combination of:
+Qwen 3.5 uses **Gated Delta Networks** (linear attention layers) which were not fully supported by bitsandbytes 0.49.x 4-bit quantization. The failing combination was:
 - bitsandbytes 0.49.2
 - transformers 5.3.0
 - PyTorch 2.11.0+cu128
@@ -21,9 +23,9 @@ Qwen 3.5 uses **Gated Delta Networks** (linear attention layers) which are not f
 
 triggers a segfault in `bitsandbytes.backends.cuda.ops` during the NF4 quantization of the Gated Delta Network weight matrices.
 
-### Resolution: Unsloth
+### Supported Path: Unsloth
 
-**Unsloth's FastModel handles Qwen 3.5 natively on Windows** — no triton, no causal-conv1d, no segfaults. Install `pip install unsloth triton-windows`.
+**Unsloth's FastModel handles the Qwen 3.5/3.6 architecture natively on Windows** — use it instead of raw bitsandbytes loading. Install `pip install unsloth triton-windows`.
 
 ```python
 # CRASHES (raw transformers + bitsandbytes):
@@ -47,9 +49,7 @@ model = FastModel.get_peft_model(model, r=16, lora_alpha=16, target_modules=[...
 | BF16 (crashes) | ~13 GB | ~54 GB (won't fit) | ~19 GB / N/A |
 | bnb 4-bit (crashes) | segfault | segfault | N/A |
 
-For the 9B model, BF16 uses ~13GB leaving ~19GB for LoRA + optimizer — sufficient for training on RTX 5090 32GB.
-
-For the 27B model, BF16 won't fit. Options when scaling up:
+For the 27B model, BF16 won't fit on a 32GB card. Options when scaling up:
 1. Wait for bitsandbytes fix for Gated Delta Networks
 2. Use 8-bit quantization (`load_in_8bit=True`) — untested
 3. Use GPTQ/AWQ pre-quantized weights from HuggingFace
@@ -64,7 +64,7 @@ import torch
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 bnb = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16)
 model = AutoModelForCausalLM.from_pretrained(
-    'models/Huihui-Qwen3.5-9B-Claude-4.6-Opus-abliterated',
+    'models/Qwen3.6-27B',
     quantization_config=bnb, device_map='auto', trust_remote_code=True
 )
 "
@@ -73,8 +73,9 @@ model = AutoModelForCausalLM.from_pretrained(
 
 ### Files Affected
 
-- `src/loop2_distill/sft_launcher.py` — Changed from 4-bit to BF16 loading
-- `src/infra/vram_scheduler.py` — VRAM target may need adjustment for BF16
+- `src/loop2_distill/sft_launcher.py` — Uses Unsloth FastModel instead of raw bitsandbytes loading
+- `scripts/smoke_test_training.py` — Uses Unsloth FastModel for the supported smoke path
+- `pyproject.toml` — Keeps `bitsandbytes` out of the default training extra until revalidated
 
 ---
 
@@ -97,14 +98,14 @@ model = AutoModelForCausalLM.from_pretrained(
 
 ---
 
-## Qwen 3.5 Abliterated Requires think=true
+## Qwen thinking models require think=true for this harness
 
 **Status**: Fixed in codebase
 **Affected**: All inference calls
 
 ### Problem
 
-The `huihui_ai/qwen3.5-abliterated` model cannot produce content with `think: false`. With thinking disabled, the model generates `<think>` as its first token, which Ollama suppresses, resulting in `content: ""` (empty string) for every response.
+Some Qwen thinking-first variants cannot produce reliable `content` with `think: false`. With thinking disabled, the model may generate a thinking token first that the serving layer suppresses, resulting in `content: ""` (empty string).
 
 ### Fix
 

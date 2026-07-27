@@ -1,6 +1,6 @@
-"""Opus-based per-step process reward (expensive, sampled).
+"""Teacher-based per-step process reward (expensive, sampled).
 
-Sends the full trajectory to Opus for structured per-step evaluation across
+Sends the full trajectory to the configured teacher for structured evaluation across
 four quality dimensions.  This module is intentionally expensive and should
 only be called on a sampled subset of trajectories.
 """
@@ -59,17 +59,17 @@ async def compute_process_reward(
     task_spec: TaskSpec,
     opus_client: OpusClient,
 ) -> list[dict[str, Any]]:
-    """Compute per-step process rewards via Opus evaluation.
+    """Compute per-step process rewards via teacher evaluation.
 
-    Sends the full trajectory and task specification to Opus with a structured
-    prompt.  Opus rates each step on four dimensions (0.0 -- 1.0):
+    Sends the full trajectory and task specification to the teacher with a structured
+    prompt. The teacher rates each step on four dimensions (0.0 -- 1.0):
 
     * **correctness** -- was this the right action given current knowledge?
     * **efficiency** -- did this step make meaningful progress?
     * **reasoning_quality** -- was the thinking sound?
     * **information_utilization** -- did it use available info well?
 
-    Opus also identifies the *critical decision point* -- the step where
+    The teacher also identifies the *critical decision point* -- the step where
     success or failure was most strongly determined.
 
     Parameters
@@ -79,7 +79,7 @@ async def compute_process_reward(
     task_spec:
         The task specification for context.
     opus_client:
-        An :class:`OpusClient` for making the evaluation call.
+        A teacher client for making the evaluation call.
 
     Returns
     -------
@@ -184,7 +184,7 @@ def average_process_score(step_ratings: list[dict[str, Any]]) -> float:
 
 
 def _build_evaluation_prompt(trajectory: Trajectory, task_spec: TaskSpec) -> str:
-    """Construct the structured prompt for Opus process evaluation."""
+    """Construct the structured prompt for teacher process evaluation."""
     dim_descriptions = "\n".join(
         f"  - **{name}**: {desc}" for name, desc in DIMENSIONS.items()
     )

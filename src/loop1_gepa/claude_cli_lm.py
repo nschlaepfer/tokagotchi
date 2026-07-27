@@ -77,7 +77,13 @@ def _resolve_claude_cli() -> list[str]:
     raise FileNotFoundError("Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code")
 
 
-def call_claude_cli(prompt: str, max_tokens: int = 4096) -> str:
+def call_claude_cli(
+    prompt: str,
+    max_tokens: int = 4096,
+    *,
+    model: str = "claude-opus-5",
+    effort: str = "high",
+) -> str:
     """Call Claude Opus via the CLI and return the text response.
 
     Parameters
@@ -97,6 +103,8 @@ def call_claude_cli(prompt: str, max_tokens: int = 4096) -> str:
     if len(prompt) > 4000:
         cmd = [
             *cli_cmd,
+            "--model", model,
+            "--effort", effort,
             "-p", "-",
             "--output-format", "json",
             "--max-turns", "1",
@@ -106,6 +114,8 @@ def call_claude_cli(prompt: str, max_tokens: int = 4096) -> str:
     else:
         cmd = [
             *cli_cmd,
+            "--model", model,
+            "--effort", effort,
             "-p", prompt,
             "--output-format", "json",
             "--max-turns", "1",
@@ -173,8 +183,9 @@ class ClaudeCliLM:
         optimizer = dspy.GEPA(reflection_lm=reflection_lm, ...)
     """
 
-    def __init__(self, model: str = "claude-opus-4-6") -> None:
+    def __init__(self, model: str = "claude-opus-5", effort: str = "high") -> None:
         self.model = model
+        self.effort = effort
         self.history: list[dict[str, Any]] = []
 
     def __call__(self, prompt: str | None = None, messages: list | None = None, **kwargs: Any) -> list[str]:
@@ -199,7 +210,7 @@ class ClaudeCliLM:
         else:
             return [""]
 
-        response = call_claude_cli(prompt_text)
+        response = call_claude_cli(prompt_text, model=self.model, effort=self.effort)
         self.history.append({
             "prompt": prompt_text[:200],
             "response": response[:200],
@@ -213,4 +224,9 @@ class ClaudeCliLM:
     @property
     def kwargs(self) -> dict[str, Any]:
         """DSPy accesses this for model metadata."""
-        return {"model": self.model, "temperature": 1.0, "max_tokens": 4096}
+        return {
+            "model": self.model,
+            "effort": self.effort,
+            "temperature": 1.0,
+            "max_tokens": 4096,
+        }

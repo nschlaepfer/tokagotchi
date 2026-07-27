@@ -1,6 +1,6 @@
-"""Opus-powered trace surgery on failed Qwen trajectories.
+"""Teacher-powered trace surgery on failed Qwen trajectories.
 
-Sends full trajectories to Opus for diagnosis, receives corrected steps
+Sends full trajectories to the configured teacher for diagnosis, receives corrected steps
 from the failure point forward, and converts them into chat-format
 training examples for SFT.
 """
@@ -32,17 +32,17 @@ _DEFAULT_DELAY_SECONDS = 1.0
 
 
 class TraceSurgeon:
-    """Performs Opus-guided trace surgery on failed trajectories.
+    """Performs teacher-guided trace surgery on failed trajectories.
 
-    Sends trajectories to Opus for diagnosis, extracts corrected steps,
+    Sends trajectories to the teacher for diagnosis, extracts corrected steps,
     and converts them into SFT-ready training examples.
 
     Parameters
     ----------
     max_concurrent:
-        Maximum number of concurrent Opus surgery calls.
+        Maximum number of concurrent teacher surgery calls.
     inter_call_delay:
-        Minimum delay in seconds between Opus calls for rate limiting.
+        Minimum delay in seconds between teacher calls for rate limiting.
     """
 
     def __init__(
@@ -64,9 +64,9 @@ class TraceSurgeon:
         task_spec: TaskSpec,
         opus_client: OpusClient,
     ) -> TraceAnalysis:
-        """Send a trajectory to Opus for diagnosis and correction.
+        """Send a trajectory to the teacher for diagnosis and correction.
 
-        Opus identifies the exact failure step, diagnoses the root cause,
+        The teacher identifies the exact failure step, diagnoses the root cause,
         and produces corrected steps from that point forward.
 
         Parameters
@@ -76,7 +76,7 @@ class TraceSurgeon:
         task_spec:
             The original task specification for context.
         opus_client:
-            An initialised OpusClient for making Opus queries.
+            An initialised teacher client.
 
         Returns
         -------
@@ -161,7 +161,7 @@ class TraceSurgeon:
         """Convert a trajectory and its surgery analysis into a chat-format training example.
 
         The example preserves all correct steps up to the failure point,
-        then splices in Opus's corrected steps from the failure onward.
+        then splices in the teacher's corrected steps from the failure onward.
 
         Format::
 
@@ -221,7 +221,7 @@ class TraceSurgeon:
             if step.observation:
                 messages.append({"role": "user", "content": step.observation})
 
-        # Splice in corrected steps from Opus
+        # Splice in corrected steps from the teacher
         for corrected in analysis.corrected_steps:
             action_type = corrected.get("action_type", "think")
             action_content = corrected.get("action_content", "")
@@ -269,7 +269,7 @@ class TraceSurgeon:
         task_specs:
             Mapping of task_id to TaskSpec for context lookup.
         opus_client:
-            An initialised OpusClient.
+            An initialised teacher client.
 
         Returns
         -------

@@ -76,7 +76,7 @@ class Trajectory:
 
 @dataclass
 class TraceAnalysis:
-    """Opus's analysis of a trajectory."""
+    """Teacher analysis of a trajectory."""
     trajectory_id: str = ""
     failure_step: int | None = None
     diagnosis: str = ""
@@ -100,8 +100,8 @@ class PromptGenome:
     scores: dict[str, float] = field(default_factory=dict)
     # Mutation lineage — filled when genome is created via mutation
     mutation_type: str = ""          # e.g. "add_example", "modify_tool_instructions"
-    mutation_diagnosis: str = ""     # Opus's analysis of why mutation was needed
-    mutation_rationale: str = ""     # Opus's explanation of the change
+    mutation_diagnosis: str = ""     # Teacher analysis of why mutation was needed
+    mutation_rationale: str = ""     # Teacher explanation of the change
     created_at: str = ""             # ISO timestamp of genome creation
 
     def to_system_message(self) -> str:

@@ -2,7 +2,7 @@
 
 **Raise your own AI on a single GPU.**
 
-tokagotchi is a self-improving AI system that runs on a single RTX 5090 (32GB). It uses Claude Opus 4.6 as a teacher/judge to continuously evolve and train a local Qwen 3.5 9B model — making it increasingly capable as a coding agent over time. The 27B model is supported for later scaling.
+tokagotchi is a self-improving AI system that runs on a single RTX 5090 (32GB). It uses Codex GPT-5.6 Sol as the default teacher/judge/reviewer and a local Qwen3.6 27B model as the student. Claude Opus 5 is still supported as an optional provider if you have Claude Code access.
 
 Think of it as a Tamagotchi for LLMs: you feed it tasks, it learns from its mistakes, and it grows stronger overnight.
 
@@ -11,14 +11,14 @@ Think of it as a Tamagotchi for LLMs: you feed it tasks, it learns from its mist
 Three training loops run at different timescales, each building on the last:
 
 ### Loop 1 — Prompt Evolution (minutes)
-GEPA-style evolutionary optimization of prompts and context. No weight updates — just finding the best way to talk to your model. Opus analyzes execution traces, diagnoses failures, and proposes targeted mutations. **Forced mutation diversity** cycles through 5 high-impact types (add_example, modify_tool_instructions, strengthen_instruction, add_error_recovery, add_cot_step) to prevent defaulting to shallow rephrasing. Based on [Training-Free GRPO](https://arxiv.org/abs/2503.04644) and [GEPA](https://arxiv.org/abs/2502.02968).
+GEPA-style evolutionary optimization of prompts and context. No weight updates — just finding the best way to talk to your model. The configured teacher model defaults to Codex GPT-5.6 Sol, which analyzes execution traces, diagnoses failures, and proposes targeted mutations. **Forced mutation diversity** cycles through 5 high-impact types (add_example, modify_tool_instructions, strengthen_instruction, add_error_recovery, add_cot_step) to prevent defaulting to shallow rephrasing. Based on [Training-Free GRPO](https://arxiv.org/abs/2503.04644) and [GEPA](https://arxiv.org/abs/2502.02968).
 
 ### Loop 2 — On-Policy Distillation + SDPO (hours)
 **Two-tier training signal generation from failed trajectories:**
 
 1. **SDPO (free)**: Self-Distillation via Behavioral Divergence. After a failed episode, replays the trajectory through Qwen with error feedback injected. Steps where the model changes its action become contrastive training pairs — at zero API cost. See our paper on [Divergence-Gated Hierarchical Distillation](#research).
 
-2. **Opus trace surgery (fallback)**: When SDPO produces zero contrastive pairs (the model is "confidently wrong" even after seeing the error), Opus performs targeted correction. This concentrates expensive expert supervision on the model's blind spots.
+2. **Teacher trace surgery (fallback)**: When SDPO produces zero contrastive pairs (the model is "confidently wrong" even after seeing the error), the configured teacher performs targeted correction. The default teacher is Codex GPT-5.6 Sol; Claude Opus 5 remains optional.
 
 Corrections accumulate into a diversity-aware training buffer, then **LoRA fine-tuning via Unsloth** bakes the lessons into weights. Based on [SCoRe](https://arxiv.org/abs/2504.01408), [SDPO](https://arxiv.org/abs/2601.20802), and [OPSD](https://arxiv.org/abs/2601.18734).
 
@@ -29,8 +29,9 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Opus 4.6 (Claude Code headless)                    │
-│  Teacher / Judge / Curriculum Designer               │
+│  Teacher Provider                                   │
+│  Default: Codex GPT-5.6 Sol via codex exec          │
+│  Optional: Claude Opus 5 via claude -p              │
 └──────────┬────────────────┬───────────────┬─────────┘
            │                │               │
     ┌──────▼──────┐  ┌──────▼──────┐  ┌────▼────────┐
@@ -40,7 +41,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
     └──────┬──────┘  └──────┬──────┘  └────┬────────┘
            │                │               │
     ┌──────▼────────────────▼───────────────▼─────────┐
-    │  Qwen 3.5 9B (think=true) — RTX 5090 32GB      │
+    │  Qwen3.6 27B (think=true) — RTX 5090 32GB        │
     │  Ollama serving / Unsloth LoRA training          │
     └──────────────────────┬──────────────────────────┘
                            │
@@ -53,23 +54,34 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 
 ## Key Technical Details
 
-- **Training via Unsloth**: Qwen 3.5's Gated Delta Networks require specialized CUDA kernels (triton, causal-conv1d) that don't work on Windows. [Unsloth](https://unsloth.ai) handles this natively — loads the model in 4-bit at 8GB VRAM, 1.5x faster training, 50% less memory. See `docs/KNOWN_ISSUES.md` for details.
-- **Thinking mode**: Qwen 3.5 abliterated requires `think=true` — the model cannot produce content without reasoning first. The system handles this natively.
+- **Training via Unsloth**: Qwen3.6 uses the newer Qwen3.5-family architecture. The supported Windows path is [Unsloth](https://unsloth.ai) rather than raw bitsandbytes 4-bit loading. See `docs/KNOWN_ISSUES.md` for details.
+- **Thinking mode**: Qwen thinking models should run with `think=true` in this harness. The system handles reasoning/thinking fields natively.
 - **Action parser**: Robust multi-format parser handles Qwen's output patterns including `<think>` blocks, orphaned `</think>` tags, bracket-style `[action content]`, and reasoning text before actions.
+- **Subscription auth**: Default teacher calls route through `codex exec`, so normal Codex subscription login is used instead of project-level API keys. If you opt into Claude, calls route through `claude -p`.
 - **Sandbox backend**: Auto-detects Docker; falls back to subprocess sandboxes with a `python->python3` shim for Windows/Git Bash compatibility.
-- **Mutation lineage**: Every genome stores its mutation type, Opus's diagnosis, rationale, and creation timestamp. Full mutation history logged to `mutation_log.jsonl`.
+- **Mutation lineage**: Every genome stores its mutation type, teacher diagnosis, rationale, and creation timestamp. Full mutation history logs to `mutation_log.jsonl`.
 - **Trajectory persistence**: Eval results save full step-by-step data (actions, observations, reasoning, rewards) for replay and analysis.
 - **Weights & Biases**: Real-time tracking of genome evals, SDPO pairs, training loss, budget, and pipeline status at [wandb.ai](https://wandb.ai).
+
+## Model Defaults
+
+Verified on 2026-07-27:
+
+| Role | Default | Why |
+|------|---------|-----|
+| Student / local serving | `qwen3.6:27b` | Current open Qwen3.6 dense 27B model with Ollama support; fits a 32GB RTX 5090 in Q4_K_M. See [Qwen3.6-27B](https://qwen.ai/blog?id=qwen3.6-27b) and [Ollama qwen3.6](https://ollama.com/library/qwen3.6). |
+| Teacher / judge / reviewer | `gpt-5.6-sol` with `medium` effort | OpenAI's GPT-5.6 flagship model for complex coding/reasoning. OpenAI lists Sol, Terra, and Luna; this repo defaults to Sol because quality matters more than throughput for mutations, trace surgery, and reviews. See [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model) and [Codex models](https://developers.openai.com/codex/models). |
+| Optional Claude provider | `claude-opus-5` with `high` effort | Kept for users with Claude Code access. To use it, set `opus.provider: "claude"`, `opus.model: "claude-opus-5"`, and `opus.model_reasoning_effort: "high"` in `config/master.yaml`. See [Claude models](https://platform.claude.com/docs/en/about-claude/models/overview) and [Claude Code model settings](https://code.claude.com/docs/en/settings). |
 
 ## Requirements
 
 - **GPU**: NVIDIA RTX 5090 (32GB) or similar
 - **OS**: Windows 11 (Git Bash / MSYS2) — Docker optional
-- **CLI**: Claude Code CLI (`npm install -g @anthropic-ai/claude-code`)
+- **CLI**: Codex CLI logged into your ChatGPT/Codex subscription. Claude Code CLI is optional and only needed if you switch `opus.provider` to `claude`.
 - **Python**: 3.11+
-- **Model**: Pulled via Ollama (`ollama pull huihui_ai/qwen3.5-abliterated:9b`)
-- **Training**: `pip install unsloth triton-windows` (handles Qwen 3.5 on Windows)
-- **Storage**: ~20GB for model weights + ~5GB for data/checkpoints
+- **Model**: Pulled via Ollama (`ollama pull qwen3.6:27b`)
+- **Training**: `pip install unsloth triton-windows`; for LoRA training, download `Qwen/Qwen3.6-27B` to `models/Qwen3.6-27B`
+- **Storage**: ~25GB for Ollama-only use; ~80GB+ if keeping Hugging Face weights and checkpoints for training
 
 ## Quick Start
 
@@ -80,8 +92,15 @@ cd tokagotchi
 pip install -e .
 pip install unsloth triton-windows
 
-# Pull the model
-ollama pull huihui_ai/qwen3.5-abliterated:9b
+# Login/check CLIs
+codex login
+codex --version
+
+# Pull the local student model
+ollama pull qwen3.6:27b
+
+# Download HF weights for Loop 2 / Loop 3 training
+huggingface-cli download Qwen/Qwen3.6-27B --local-dir models/Qwen3.6-27B
 
 # Run the full self-improving pipeline
 python scripts/run_all.py --config config/ --log-file data/logs/run.log --log-level INFO
@@ -96,13 +115,13 @@ python scripts/run_loop1.py --iterations 10
 tokagotchi/
 ├── config/              # YAML configs for all loops, arena, rewards
 ├── src/
-│   ├── orchestrator/    # Opus client, budget tracker, master loop, git experiments
+│   ├── orchestrator/    # Teacher client, budget tracker, master loop, git experiments
 │   ├── loop1_gepa/      # Prompt evolution: genome, mutations, Pareto frontier
 │   ├── loop2_distill/   # SDPO + Unsloth SFT: trace surgery, training, mentor sessions
 │   ├── loop3_rl/        # RL: Tree-GRPO, DAPO clipping, trajectory filtering
 │   ├── arena/           # Subprocess sandboxes + tools (bash, python, SQL, APIs)
 │   ├── curriculum/      # Self-Evolving Curriculum, task generation, frontier probing
-│   ├── rewards/         # Outcome, process (Opus-judged), efficiency, composite
+│   ├── rewards/         # Outcome, process (teacher-judged), efficiency, composite
 │   └── infra/           # Ollama server, VRAM scheduler, eval harness, wandb tracker
 ├── paper/               # DGHD paper (LaTeX)
 ├── docs/                # Reference papers (PDFs) + KNOWN_ISSUES.md
@@ -135,14 +154,15 @@ This project introduces **Divergence-Gated Hierarchical Distillation (DGHD)** �
 
 | Component | Rate | Daily Estimate |
 |-----------|------|---------------|
-| Loop 1 mutations (Opus) | ~$0.03/call, 50/hr | ~$3-5 |
+| Loop 1 mutations | Codex subscription / provider-limited | tracked for observability |
 | Loop 2 SDPO (local) | $0 | $0 |
-| Loop 2 Opus fallback | ~$0.03-0.05/call, as needed | ~$2-5 |
+| Loop 2 teacher fallback | Codex subscription / provider-limited | tracked for observability |
+| Optional Claude mode | Claude Code subscription / provider-limited | only used if `opus.provider: "claude"` |
 | Loop 2 training (local, Unsloth) | $0 | $0 |
 | Loop 3 RL (local) | $0 (overnight) | $0 |
-| **Total** | | **~$5-10/day** |
+| **Local compute total** | | **$0 marginal API spend** |
 
-SDPO reduces Loop 2 costs by an estimated 70-80% by handling most failures locally.
+SDPO reduces teacher usage by handling most failures locally before escalating to teacher trace surgery.
 
 ## VRAM Management
 
@@ -152,13 +172,14 @@ The single GPU serves double duty:
 
 Phase transitions are automatic — the VRAM scheduler stops Ollama (with retry + nvidia-smi verification), runs training, then restarts serving.
 
-## Scaling to 27B
+## Scaling Beyond 27B
 
-The 9B model is the proof of concept. To scale up:
-1. Download: `huggingface-cli download huihui-ai/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated`
-2. Pull: `ollama pull huihui_ai/qwen3.5-abliterated:27b`
-3. Change `model.name` in `config/master.yaml`
-4. Everything else (GEPA, SDPO, Unsloth training, RL) just works on the bigger model
+The default is now the 27B dense model. To experiment with the larger sparse coding model:
+
+1. Download: `huggingface-cli download Qwen/Qwen3.6-35B-A3B --local-dir models/Qwen3.6-35B-A3B`
+2. Pull: `ollama pull qwen3.6:35b-a3b`
+3. Change `model.name`, `model.base_ollama_model`, and `model.hf_model_path` in `config/master.yaml`
+4. Re-run the smoke tests before starting a long training loop
 
 Optional: Build [Madreag's TurboQuant fork](https://github.com/Madreag/turbo3-cuda) for 4.6x KV cache compression on the RTX 5090 — enables 262K+ context for the 27B model.
 

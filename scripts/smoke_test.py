@@ -1,43 +1,36 @@
-"""Smoke test: verify Ollama + Claude CLI work, then run a mini Loop 1 iteration.
+"""Smoke test: verify Ollama + Codex CLI work, then run a mini Loop 1 iteration.
 
 Usage:
     python scripts/smoke_test.py
 
 This test does NOT require Docker. It tests:
 1. Ollama is serving the model and can do inference
-2. Claude CLI (headless) can be invoked and returns structured output
+2. Codex CLI is installed and available
 3. A single GEPA mutation cycle works end-to-end
 """
 
 import asyncio
-import json
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import time
 
 import openai
 
 
-def find_claude_cli() -> str:
-    """Find the claude CLI binary, checking common locations."""
-    # Check PATH first
-    found = shutil.which("claude")
+def find_cli(name: str) -> str:
+    """Find a CLI binary on PATH."""
+    found = shutil.which(name)
     if found:
         return found
-    # Common Windows npm global install location
-    npm_path = os.path.expandvars(r"%APPDATA%\npm\claude.cmd")
-    if os.path.exists(npm_path):
-        return npm_path
-    npm_path2 = os.path.expandvars(r"%APPDATA%\npm\claude")
-    if os.path.exists(npm_path2):
-        return npm_path2
-    return "claude"  # fallback, hope for the best
+    return name
 
 
-CLAUDE_BIN = find_claude_cli()
+CODEX_BIN = find_cli("codex")
+CODEX_MODEL = os.environ.get("TOKAGOTCHI_CODEX_MODEL", "gpt-5.6-sol")
+CODEX_EFFORT = os.environ.get("TOKAGOTCHI_CODEX_EFFORT", "medium")
+OLLAMA_MODEL = os.environ.get("TOKAGOTCHI_OLLAMA_MODEL", "qwen3.6:27b")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("smoke_test")
@@ -57,7 +50,7 @@ async def check_ollama() -> bool:
     try:
         t0 = time.time()
         response = await client.chat.completions.create(
-            model="huihui_ai/qwen3.5-abliterated:27b",
+            model=OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": "You are a coding assistant. Be concise."},
                 {"role": "user", "content": "Write a Python function that checks if a number is prime. Just the code, nothing else."},
@@ -79,48 +72,45 @@ async def check_ollama() -> bool:
         return False
 
 
-async def check_claude_cli() -> bool:
-    """Test that Claude CLI headless mode works."""
+async def check_codex_cli() -> bool:
+    """Test that Codex CLI is installed."""
     logger.info("=" * 60)
-    logger.info("TEST 2: Claude CLI headless mode")
+    logger.info("TEST 2: Codex CLI")
     logger.info("=" * 60)
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p",
-            "Return a JSON object with exactly these fields: {\"status\": \"ok\", \"message\": \"hello from opus\"}. Return ONLY the JSON, no markdown.",
-            "--output-format", "text",
-            "--max-turns", "1",
+            CODEX_BIN, "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
         output = stdout.decode().strip()
 
-        logger.info("Claude CLI output: %s", output[:500])
+        logger.info("Codex CLI output: %s", output[:500])
 
         if proc.returncode == 0 and len(output) > 0:
-            logger.info("PASS: Claude CLI headless works")
+            logger.info("PASS: Codex CLI is available")
             return True
         else:
-            logger.error("FAIL: Claude CLI returned code %d, stderr: %s", proc.returncode, stderr.decode()[:300])
+            logger.error("FAIL: Codex CLI returned code %d, stderr: %s", proc.returncode, stderr.decode()[:300])
             return False
 
     except asyncio.TimeoutError:
-        logger.error("FAIL: Claude CLI timed out after 60s")
+        logger.error("FAIL: Codex CLI timed out")
         return False
     except FileNotFoundError:
-        logger.error("FAIL: 'claude' command not found on PATH")
+        logger.error("FAIL: 'codex' command not found on PATH")
         return False
     except Exception as e:
-        logger.error("FAIL: Claude CLI error: %s", e)
+        logger.error("FAIL: Codex CLI error: %s", e)
         return False
 
 
 async def check_mini_gepa_cycle() -> bool:
-    """Test a simplified GEPA mutation cycle: Opus analyzes a Qwen response and proposes an improvement."""
+    """Test a simplified GEPA mutation cycle using Codex as the teacher."""
     logger.info("=" * 60)
-    logger.info("TEST 3: Mini GEPA cycle (Opus analyzes Qwen, proposes mutation)")
+    logger.info("TEST 3: Mini GEPA cycle (Codex analyzes Qwen, proposes mutation)")
     logger.info("=" * 60)
 
     # Step 1: Get a response from Qwen
@@ -132,7 +122,7 @@ async def check_mini_gepa_cycle() -> bool:
     try:
         t0 = time.time()
         qwen_response = await client.chat.completions.create(
-            model="huihui_ai/qwen3.5-abliterated:27b",
+            model=OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": test_prompt},
@@ -143,7 +133,7 @@ async def check_mini_gepa_cycle() -> bool:
         qwen_output = qwen_response.choices[0].message.content
         logger.info("Qwen response (%.1fs): %s", time.time() - t0, qwen_output[:300])
 
-        # Step 2: Send to Opus for analysis
+        # Step 2: Send to Codex for analysis
         analysis_prompt = f"""Analyze this coding agent's response to a task and suggest ONE specific improvement to the system prompt.
 
 TASK: {test_prompt}
@@ -156,22 +146,28 @@ Return a JSON object:
 Return ONLY valid JSON, no markdown."""
 
         proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p", analysis_prompt,
-            "--output-format", "text",
-            "--max-turns", "1",
+            CODEX_BIN,
+            "exec",
+            "--model",
+            CODEX_MODEL,
+            "-c",
+            f'model_reasoning_effort="{CODEX_EFFORT}"',
+            "--sandbox",
+            "read-only",
+            analysis_prompt,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-        opus_output = stdout.decode().strip()
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
+        teacher_output = stdout.decode().strip()
 
-        logger.info("Opus analysis: %s", opus_output[:500])
+        logger.info("Codex analysis: %s", teacher_output[:500])
 
-        if proc.returncode == 0 and len(opus_output) > 10:
+        if proc.returncode == 0 and len(teacher_output) > 10:
             logger.info("PASS: Mini GEPA cycle completed")
             return True
         else:
-            logger.error("FAIL: Opus analysis failed (code=%d)", proc.returncode)
+            logger.error("FAIL: Codex analysis failed (code=%d): %s", proc.returncode, stderr.decode()[:300])
             return False
 
     except Exception as e:
@@ -183,9 +179,9 @@ async def main() -> None:
     results = {}
 
     results["ollama"] = await check_ollama()
-    results["claude_cli"] = await check_claude_cli()
+    results["codex_cli"] = await check_codex_cli()
 
-    if results["ollama"] and results["claude_cli"]:
+    if results["ollama"] and results["codex_cli"]:
         results["gepa_cycle"] = await check_mini_gepa_cycle()
     else:
         logger.warning("Skipping GEPA cycle test — prerequisites failed")

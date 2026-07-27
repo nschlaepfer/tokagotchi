@@ -1,7 +1,7 @@
 """Loop 1 Lite: GEPA prompt evolution without Docker.
 
-Runs the core Opus-analyzes-Qwen-and-mutates-prompts loop using
-Ollama for Qwen inference and Claude CLI for Opus mutations.
+Runs the core teacher-analyzes-Qwen-and-mutates-prompts loop using
+Ollama for Qwen inference and Codex CLI by default for mutations.
 No Docker arena needed — tasks are evaluated purely through
 Qwen's generated action plans (not executed).
 
@@ -30,8 +30,15 @@ logging.basicConfig(
 logger = logging.getLogger("loop1_lite")
 
 # ---------------------------------------------------------------------------
-# Claude CLI helper
+# Teacher CLI helpers
 # ---------------------------------------------------------------------------
+
+def find_cli(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    return name
+
 
 def find_claude_cli() -> str:
     found = shutil.which("claude")
@@ -42,9 +49,15 @@ def find_claude_cli() -> str:
         return npm_path
     return "claude"
 
+CODEX_BIN = find_cli("codex")
 CLAUDE_BIN = find_claude_cli()
-MODEL_NAME = "huihui_ai/qwen3.5-abliterated:27b"
+MODEL_NAME = os.environ.get("TOKAGOTCHI_OLLAMA_MODEL", "qwen3.6:27b")
 OLLAMA_BASE = "http://localhost:11434/v1"
+TEACHER_PROVIDER = os.environ.get("TOKAGOTCHI_TEACHER_PROVIDER", "codex").lower()
+CODEX_MODEL = os.environ.get("TOKAGOTCHI_CODEX_MODEL", "gpt-5.6-sol")
+CODEX_EFFORT = os.environ.get("TOKAGOTCHI_CODEX_EFFORT", "medium")
+CLAUDE_MODEL = os.environ.get("TOKAGOTCHI_CLAUDE_MODEL", "claude-opus-5")
+CLAUDE_EFFORT = os.environ.get("TOKAGOTCHI_CLAUDE_EFFORT", "high")
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -166,11 +179,79 @@ async def evaluate_genome(genome: PromptGenome, client: openai.AsyncOpenAI) -> l
 
 
 # ---------------------------------------------------------------------------
-# Mutation: Opus analyzes results and proposes improvements
+# Mutation: teacher analyzes results and proposes improvements
 # ---------------------------------------------------------------------------
 
+def extract_json_payload(output: str) -> dict:
+    """Extract a JSON object from raw teacher output."""
+    json_str = output.strip()
+    if "```json" in json_str:
+        json_str = json_str.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in json_str:
+        json_str = json_str.split("```", 1)[1].split("```", 1)[0].strip()
+    else:
+        start = json_str.find("{")
+        end = json_str.rfind("}")
+        if start >= 0 and end > start:
+            json_str = json_str[start:end + 1]
+    return json.loads(json_str)
+
+
+async def call_teacher(prompt: str) -> str:
+    """Call Codex by default, or Claude when explicitly configured."""
+    provider = TEACHER_PROVIDER
+    stdin_text: str | None = None
+
+    if provider == "codex":
+        cmd = [
+            CODEX_BIN,
+            "exec",
+            "--model",
+            CODEX_MODEL,
+            "-c",
+            f'model_reasoning_effort="{CODEX_EFFORT}"',
+            "--sandbox",
+            "read-only",
+        ]
+        if len(prompt) > 4000:
+            cmd.append("-")
+            stdin_text = prompt
+        else:
+            cmd.append(prompt)
+    elif provider == "claude":
+        cmd = [
+            CLAUDE_BIN,
+            "-p",
+            "-" if len(prompt) > 4000 else prompt,
+            "--model",
+            CLAUDE_MODEL,
+            "--effort",
+            CLAUDE_EFFORT,
+            "--output-format",
+            "text",
+            "--max-turns",
+            "1",
+        ]
+        if len(prompt) > 4000:
+            stdin_text = prompt
+    else:
+        raise ValueError("TOKAGOTCHI_TEACHER_PROVIDER must be 'codex' or 'claude'")
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.PIPE if stdin_text else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdin_bytes = stdin_text.encode("utf-8") if stdin_text else None
+    stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin_bytes), timeout=180)
+    output = stdout.decode(errors="replace").strip()
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.decode(errors="replace").strip() or output)
+    return output
+
 async def propose_mutation(genome: PromptGenome, results: list[TaskResult]) -> PromptGenome:
-    """Send genome + eval results to Opus, get a mutated genome back."""
+    """Send genome + eval results to the teacher and get a mutated genome back."""
 
     # Build analysis context
     results_summary = []
@@ -186,7 +267,7 @@ async def propose_mutation(genome: PromptGenome, results: list[TaskResult]) -> P
 
     avg_score = sum(r.score for r in results) / len(results) if results else 0
 
-    prompt = f"""You are optimizing a system prompt for a coding agent (Qwen 3.5 27B).
+    prompt = f"""You are optimizing a system prompt for a coding agent (Qwen3.6 27B).
 The agent must use tools like [bash], [python], [read_file], [write_file], [sql], [api_call], [submit] to solve coding tasks.
 
 CURRENT SYSTEM PROMPT:
@@ -217,25 +298,8 @@ Return ONLY a JSON object with these exact fields:
 }}"""
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN, "-p", prompt,
-            "--output-format", "text",
-            "--max-turns", "1",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-        output = stdout.decode().strip()
-
-        # Try to parse JSON from the response
-        # Handle cases where Opus wraps JSON in markdown
-        json_str = output
-        if "```json" in json_str:
-            json_str = json_str.split("```json")[1].split("```")[0].strip()
-        elif "```" in json_str:
-            json_str = json_str.split("```")[1].split("```")[0].strip()
-
-        data = json.loads(json_str)
+        output = await call_teacher(prompt)
+        data = extract_json_payload(output)
 
         new_genome = PromptGenome(
             system_prompt=data.get("system_prompt", genome.system_prompt),
@@ -244,13 +308,13 @@ Return ONLY a JSON object with these exact fields:
             generation=genome.generation + 1,
         )
 
-        logger.info("  Opus diagnosis: %s", data.get("diagnosis", "N/A")[:200])
+        logger.info("  Teacher diagnosis: %s", data.get("diagnosis", "N/A")[:200])
         return new_genome
 
     except json.JSONDecodeError as e:
-        logger.warning("  Opus returned non-JSON, using raw output as system prompt")
+        logger.warning("  Teacher returned non-JSON, using raw output as system prompt: %s", e)
         return PromptGenome(
-            system_prompt=output[:3000],
+            system_prompt=(output if "output" in locals() else "")[:3000],
             tool_instructions=genome.tool_instructions,
             cot_scaffold=genome.cot_scaffold,
             generation=genome.generation + 1,
@@ -338,9 +402,9 @@ async def run_gepa(iterations: int, output_dir: Path) -> None:
         }
         history.append(iteration_data)
 
-        # Propose mutation via Opus
+        # Propose mutation via configured teacher
         if i < iterations - 1:  # Don't mutate on last iteration
-            logger.info("Proposing mutation via Opus ...")
+            logger.info("Proposing mutation via %s ...", TEACHER_PROVIDER)
             genome = await propose_mutation(genome, results)
             logger.info("New genome: %s (gen %d)", genome.genome_id, genome.generation)
 
