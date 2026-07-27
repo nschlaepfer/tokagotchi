@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Raise your own AI on a single GPU. Codex GPT-5.6 Sol evolves and trains a local Qwen3.6 27B via prompt evolution, distillation, and RL, with Claude Opus 5 kept as an optional provider."
 requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.0",           # vLLM OpenAI-compatible client
+    "openai>=1.0",           # Ollama/OpenAI-compatible client for local serving helpers
     "pydantic>=2.0",         # Config & data models
     "pyyaml>=6.0",           # Config loading
     "docker>=7.0",           # Docker container management
@@ -34,6 +34,7 @@ qsi-loop1 = "scripts.run_loop1:main"
 qsi-loop2 = "scripts.run_loop2:main"
 qsi-loop3 = "scripts.run_loop3:main"
 qsi-all = "scripts.run_all:main"
+tokagotchi-flywheel = "scripts.run_usage_flywheel:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

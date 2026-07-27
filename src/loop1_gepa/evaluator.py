@@ -434,7 +434,7 @@ async def evaluate_genome(
     tasks:
         List of tasks to run the agent on.
     vllm_server:
-        The vLLM server for Qwen inference.
+        The local LLM server for Qwen inference.
     arena_manager:
         Docker manager for arena containers.
     max_concurrent:

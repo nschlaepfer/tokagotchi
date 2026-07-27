@@ -21,7 +21,7 @@ class Phase(str, Enum):
 
 
 class VRAMScheduler:
-    """Coordinates exclusive VRAM access between vLLM serving and training.
+    """Coordinates exclusive VRAM access between local serving and training.
 
     Only one phase is active at a time.  An async lock prevents concurrent
     transitions.  The scheduler does *not* own the ``VLLMServer`` — it just
@@ -52,7 +52,7 @@ class VRAMScheduler:
         return self._phase.value
 
     async def enter_serving_phase(self, *, max_retries: int = 3) -> None:
-        """Start the vLLM server and switch to serving phase."""
+        """Start the local LLM server and switch to serving phase."""
         async with self._lock:
             if self._phase == Phase.SERVING:
                 logger.info("Already in serving phase — no-op")
@@ -78,7 +78,7 @@ class VRAMScheduler:
             logger.info("[%s] Phase is now SERVING", _ts())
 
     async def enter_training_phase(self) -> None:
-        """Stop the vLLM server, wait for VRAM to free, switch to training."""
+        """Stop local serving, wait for VRAM to free, switch to training."""
         async with self._lock:
             if self._phase == Phase.TRAINING:
                 logger.info("Already in training phase — no-op")

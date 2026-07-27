@@ -189,7 +189,7 @@ class MasterLoop:
             budget_tracker=self.budget_tracker,
         )
 
-        # vLLM server
+        # Ollama-backed LLM server (VLLMServer name kept for compatibility)
         self.vllm_server = VLLMServer(cfg.model)
 
         # VRAM scheduler
@@ -364,7 +364,7 @@ class MasterLoop:
                         # Drain training examples from the buffer
                         training_data = self._pending_buffer.get_training_batch()
 
-                        # Transition to training phase (stop vLLM)
+                        # Transition to training phase (stop Ollama serving)
                         await self.vram_scheduler.enter_training_phase()
 
                         try:
@@ -1022,7 +1022,7 @@ class MasterLoop:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        # Stop vLLM server
+        # Stop local LLM server
         if self.vllm_server:
             await self.vllm_server.stop()
 

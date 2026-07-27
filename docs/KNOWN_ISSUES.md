@@ -58,7 +58,7 @@ For the 27B model, BF16 won't fit on a 32GB card. Options when scaling up:
 ### Reproduction
 
 ```bash
-cd /e/Documents/qwen-self-improve
+cd /e/Documents/toka
 python -c "
 import torch
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
@@ -76,6 +76,40 @@ model = AutoModelForCausalLM.from_pretrained(
 - `src/loop2_distill/sft_launcher.py` — Uses Unsloth FastModel instead of raw bitsandbytes loading
 - `scripts/smoke_test_training.py` — Uses Unsloth FastModel for the supported smoke path
 - `pyproject.toml` — Keeps `bitsandbytes` out of the default training extra until revalidated
+
+---
+
+## Qwen3.6 27B Ollama startup OOM with large context
+
+**Status**: Mitigated by bounded default context
+**Affected**: Local student inference through Ollama
+**Date**: July 27, 2026
+
+### Problem
+
+`qwen3.6:27b` can fail during Ollama startup with a CUDA out-of-memory error when the serving context/compute allocation is too large for the current GPU state. On the tested RTX 5090 32GB setup, the unbounded smoke test failed while allocating compute buffers.
+
+### Supported Path
+
+Use a bounded context for day-one local student calls:
+
+```json
+{
+  "options": {
+    "num_ctx": 2048,
+    "num_predict": 16,
+    "temperature": 0
+  }
+}
+```
+
+With `num_ctx=2048`, the local smoke test returned the expected `TOKA_QWEN_OK` response.
+
+### Files Affected
+
+- `config/master.yaml` — Sets `model.ollama_num_ctx` and `usage_flywheel.student_num_ctx` to 2048
+- `src/usage_flywheel/flywheel.py` — Sends bounded local student requests
+- `src/infra/vllm_server.py` — Uses bounded warmup requests
 
 ---
 

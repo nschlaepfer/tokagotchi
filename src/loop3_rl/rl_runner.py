@@ -214,7 +214,7 @@ class RLRunner:
 
         Steps
         -----
-        1. Enter training phase (stop vLLM via VRAM scheduler).
+        1. Enter training phase (stop Ollama serving via VRAM scheduler).
         2. Load latest model checkpoint (base + any LoRA from Loop 2).
         3. Sample hard tasks from curriculum (frontier tasks).
         4. For each epoch:

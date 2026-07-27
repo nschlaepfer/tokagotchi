@@ -118,7 +118,7 @@ async def main(args: argparse.Namespace) -> None:
         genome = create_seed_genome()
 
     # Enter serving phase for trace collection
-    logger.info("Starting vLLM server for trace collection...")
+    logger.info("Starting Ollama-backed LLM server for trace collection...")
     await vram_scheduler.enter_serving_phase()
 
     try:
@@ -174,7 +174,7 @@ async def main(args: argparse.Namespace) -> None:
             logger.info("Starting SFT training with %d examples", pending_buffer.size)
             training_data = pending_buffer.drain()
 
-            # Switch to training phase (stop vLLM, free VRAM)
+            # Switch to training phase (stop Ollama serving, free VRAM)
             await vram_scheduler.enter_training_phase()
 
             try:

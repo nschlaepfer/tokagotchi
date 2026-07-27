@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ============================================================
-# Qwen Self-Improve — Setup Script
+# Tokagotchi — Setup Script
 #
 # Checks prerequisites, installs the project, downloads the
 # base model, builds the Docker arena image, creates seed data,
@@ -44,7 +44,7 @@ info "Python $PY_VERSION — OK"
 # ------------------------------------------------------------------
 # 2. Install the project with all extras
 # ------------------------------------------------------------------
-info "Installing qwen-self-improve with all extras..."
+info "Installing tokagotchi with training/dev extras..."
 "$PYTHON" -m pip install --upgrade pip
 "$PYTHON" -m pip install -e ".[training,dev]"
 info "Package installation complete"

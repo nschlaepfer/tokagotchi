@@ -6,6 +6,7 @@ model:
   quantization: "q4_k_m"
   ollama_port: 11434
   ollama_host: "localhost"
+  ollama_num_ctx: 2048
   hf_model_path: "models/Qwen3.6-27B"
   hf_model_path_27b: "models/Qwen3.6-27B"
   hf_model_path_35b_a3b: "models/Qwen3.6-35B-A3B"
@@ -38,6 +39,21 @@ codex:
   training_review_sample_size: 20
   curriculum_batch_size: 5
   curriculum_stagnation_gens: 5
+
+usage_flywheel:
+  # Product-use loop: collect local traces from real tasks, let the local
+  # student try first, and use Codex to rescue/complete failures when enabled.
+  enabled: true
+  trace_dir: "./data/usage_traces"
+  pending_jsonl: "./data/pending.jsonl"
+  privacy_mode: "local-only"
+  redact_secrets: true
+  codex_boost: "on_failure"
+  codex_sandbox: "read-only"
+  student_timeout_seconds: 120
+  codex_timeout_seconds: 300
+  max_student_tokens: 1024
+  student_num_ctx: 2048
 
 vram:
   total_gb: 32

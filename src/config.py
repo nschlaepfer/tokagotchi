@@ -19,6 +19,7 @@ class ModelConfig:
     quantization: str = "q4_k_m"  # Ollama handles quantization internally
     ollama_port: int = 11434
     ollama_host: str = "localhost"
+    ollama_num_ctx: int = 2048
     # HuggingFace model for training (Loop 2 SFT, Loop 3 RL)
     hf_model_path: str = "models/Qwen3.6-27B"
     # Same local path kept for compatibility with earlier config references.
@@ -171,6 +172,23 @@ class CodexConfig:
 
 
 @dataclass
+class UsageFlywheelConfig:
+    """Configuration for product-use trace collection and boosted supervision."""
+
+    enabled: bool = True
+    trace_dir: str = "./data/usage_traces"
+    pending_jsonl: str = "./data/pending.jsonl"
+    privacy_mode: str = "local-only"
+    redact_secrets: bool = True
+    codex_boost: str = "on_failure"  # never | on_failure | always
+    codex_sandbox: str = "read-only"
+    student_timeout_seconds: float = 120.0
+    codex_timeout_seconds: float = 300.0
+    max_student_tokens: int = 1024
+    student_num_ctx: int = 2048
+
+
+@dataclass
 class MasterConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     opus: OpusConfig = field(default_factory=OpusConfig)
@@ -182,6 +200,7 @@ class MasterConfig:
     arena: ArenaConfig = field(default_factory=ArenaConfig)
     reward_weights: RewardWeights = field(default_factory=RewardWeights)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    usage_flywheel: UsageFlywheelConfig = field(default_factory=UsageFlywheelConfig)
     data_dir: str = "./data"
 
 

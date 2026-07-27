@@ -316,7 +316,7 @@ async def _sample_action(
     temperature: float | None = None,
     sample_action_fn: SampleActionFn | None = None,
 ) -> Any:
-    """Request a single action from the model via the vLLM server."""
+    """Request a single action from the model via the local LLM server."""
     temp = temperature if temperature is not None else config.rollout_temperature
 
     if sample_action_fn is not None:

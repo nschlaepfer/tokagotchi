@@ -89,11 +89,11 @@ async def main(args: argparse.Namespace) -> None:
         persist_path=data_dir / "budget_state.json",
     )
     opus_client = OpusClient(config=cfg.opus, budget_tracker=budget_tracker)
-    vllm_server = VLLMServer(cfg.model, log_dir=data_dir / "logs")
+    vllm_server = VLLMServer(cfg.model)
     arena_manager = create_arena_manager()
 
-    # Start vLLM
-    logger.info("Starting vLLM server...")
+    # Start the Ollama-backed LLM server
+    logger.info("Starting Ollama-backed LLM server...")
     await vllm_server.start()
 
     try:

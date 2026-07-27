@@ -95,8 +95,14 @@ def test_00_imports():
     import src.loop3_rl.dapo_clipping
     import src.loop3_rl.tree_grpo
     import src.curriculum.sec_engine
+    import src.infra.ollama_utils
     import src.orchestrator.budget_tracker
     import src.orchestrator.opus_client
+    import src.usage_flywheel
+    import src.usage_flywheel.codex_harness
+    import src.usage_flywheel.flywheel
+    import src.usage_flywheel.redaction
+    import src.usage_flywheel.store
     return "All modules imported successfully"
 
 
@@ -114,6 +120,8 @@ def test_01_config_loading():
     assert cfg.opus.daily_budget_usd > 0, "Daily budget should be positive"
     assert cfg.opus.provider == "codex", f"Expected default provider codex, got {cfg.opus.provider}"
     assert cfg.opus.model == "gpt-5.6-sol", f"Expected GPT-5.6 Sol, got {cfg.opus.model}"
+    assert cfg.usage_flywheel.enabled is True, "Usage flywheel should be enabled"
+    assert cfg.usage_flywheel.codex_boost == "on_failure", cfg.usage_flywheel.codex_boost
     assert cfg.loop1.population_size > 0, "Population size should be positive"
     assert cfg.loop3.algorithm == "grpo", f"Expected grpo, got {cfg.loop3.algorithm}"
     assert len(cfg.loop1.pareto_objectives) >= 3, "Should have at least 3 pareto objectives"
@@ -197,38 +205,46 @@ def test_03_ollama_inference():
         skip("openai package not installed")
 
     from src.config import load_config
+    from src.infra.ollama_utils import ollama_base_urls
     cfg = load_config(PROJECT_ROOT / "config")
 
     # Use native Ollama API with think=false to get direct content
     # (Qwen thinking models may put content in the reasoning/thinking field)
     import requests
 
-    api_url = f"http://{cfg.model.ollama_host}:{cfg.model.ollama_port}"
-
-    try:
-        resp = requests.post(
-            f"{api_url}/api/chat",
-            json={
-                "model": cfg.model.name,
-                "messages": [
-                    {"role": "system", "content": "Reply in one short sentence."},
-                    {"role": "user", "content": "What is 2+2?"},
-                ],
-                "stream": False,
-                "think": False,
-                "options": {"num_predict": 64, "temperature": 0.0},
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-    except Exception as exc:
-        skip(f"Ollama not reachable at {api_url}: {exc}")
+    errors = []
+    for api_url in ollama_base_urls(cfg.model.ollama_host, cfg.model.ollama_port):
+        try:
+            resp = requests.post(
+                f"{api_url}/api/chat",
+                json={
+                    "model": cfg.model.name,
+                    "messages": [
+                        {"role": "system", "content": "Reply in one short sentence."},
+                        {"role": "user", "content": "What is 2+2?"},
+                    ],
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "num_predict": 64,
+                        "temperature": 0.0,
+                        "num_ctx": cfg.model.ollama_num_ctx,
+                    },
+                },
+                timeout=120,
+            )
+            resp.raise_for_status()
+            break
+        except Exception as exc:
+            errors.append(f"{api_url}: {exc}")
+    else:
+        skip("Ollama not reachable at configured endpoints: " + "; ".join(errors))
 
     data = resp.json()
     content = data.get("message", {}).get("content", "")
     tokens = data.get("eval_count", 0)
     assert len(content) > 0, f"Empty response from Ollama: {data}"
-    return f"Ollama responded ({tokens} tokens): {content[:80]}"
+    return f"Ollama responded via {api_url} ({tokens} tokens): {content[:80]}"
 
 
 # ===================================================================
@@ -357,26 +373,37 @@ def test_07_gepa_lite():
             skip("openai package not installed")
 
         from src.config import load_config
+        from src.infra.ollama_utils import ollama_base_urls
         cfg = load_config(PROJECT_ROOT / "config")
 
         try:
             import requests as _req
-            api_url = f"http://{cfg.model.ollama_host}:{cfg.model.ollama_port}"
-            resp = _req.post(
-                f"{api_url}/api/chat",
-                json={
-                    "model": cfg.model.name,
-                    "messages": [
-                        {"role": "system", "content": genome.to_system_message()[:500]},
-                        {"role": "user", "content": "What is the first step to fix a failing Python test?"},
-                    ],
-                    "stream": False,
-                    "think": False,
-                    "options": {"num_predict": 100, "temperature": 0.7},
-                },
-                timeout=120,
-            )
-            resp.raise_for_status()
+            for api_url in ollama_base_urls(cfg.model.ollama_host, cfg.model.ollama_port):
+                try:
+                    resp = _req.post(
+                        f"{api_url}/api/chat",
+                        json={
+                            "model": cfg.model.name,
+                            "messages": [
+                                {"role": "system", "content": genome.to_system_message()[:500]},
+                                {"role": "user", "content": "What is the first step to fix a failing Python test?"},
+                            ],
+                            "stream": False,
+                            "think": False,
+                            "options": {
+                                "num_predict": 100,
+                                "temperature": 0.7,
+                                "num_ctx": cfg.model.ollama_num_ctx,
+                            },
+                        },
+                        timeout=120,
+                    )
+                    resp.raise_for_status()
+                    break
+                except Exception:
+                    continue
+            else:
+                raise RuntimeError("Ollama not reachable at configured endpoints")
             ollama_answer = resp.json().get("message", {}).get("content", "")
             assert len(ollama_answer) > 0, "Empty Ollama response"
             ollama_ok = True
@@ -661,10 +688,8 @@ def test_13_sec_engine():
     from src.curriculum.sec_engine import SECEngine
     from src.models import TaskSpec, TaskType, Trajectory, StepRecord, ActionType
 
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        bank_path = f.name
-
-    try:
+    with tempfile.TemporaryDirectory() as tmp:
+        bank_path = str(Path(tmp) / "task_bank.json")
         engine = SECEngine(task_bank_path=bank_path)
 
         # Register tasks
@@ -711,9 +736,6 @@ def test_13_sec_engine():
         # Save and verify
         engine.save()
         assert Path(bank_path).exists()
-
-    finally:
-        Path(bank_path).unlink(missing_ok=True)
 
     return f"SEC engine: {engine.task_count} tasks, profile={profile['overall']:.2f} overall"
 
@@ -860,6 +882,108 @@ def test_15_pareto_tracker():
 
 
 # ===================================================================
+# Test 16: Usage flywheel trace store + redaction
+# ===================================================================
+
+def test_16_usage_flywheel_store():
+    """Persist a local product-use trace and verify secret redaction."""
+    import tempfile
+    from src.usage_flywheel.models import UsageTrace
+    from src.usage_flywheel.redaction import redact_text
+    from src.usage_flywheel.store import UsageTraceStore, append_pending_example
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = UsageTraceStore(Path(tmp) / "usage")
+        redacted, report = redact_text("debug this with token sk-proj-abcdefghijklmnopqrstuvwxyz123456")
+        assert "[REDACTED:openai_key]" in redacted
+        assert report.total_replacements == 1
+
+        trace = UsageTrace(user_task=redacted, redaction_report=report.as_dict())
+        trace.student_model = "qwen3.6:27b"
+        trace.teacher_model = "gpt-5.6-sol"
+        trace.student_status = "empty"
+        trace.codex_status = "ok"
+        trace.boost_used = True
+        trace.add_event("user_task", redacted)
+        trace_path = store.save(trace)
+
+        loaded = store.load(trace.trace_id)
+        assert loaded.trace_id == trace.trace_id
+        assert loaded.events[0].event_type == "user_task"
+        assert store.latest(1)[0]["trace_id"] == trace.trace_id
+
+        pending_path = append_pending_example(
+            Path(tmp) / "pending.jsonl",
+            example={"messages": [{"role": "user", "content": "x"}]},
+            metadata={"source": "usage_flywheel", "trace_id": trace.trace_id},
+        )
+        assert pending_path.read_text(encoding="utf-8").count("\n") == 1
+
+    return f"Usage trace persisted: {trace_path.name}, redactions={report.total_replacements}"
+
+
+# ===================================================================
+# Test 17: Usage flywheel dry run
+# ===================================================================
+
+def test_17_usage_flywheel_dry_run():
+    """Run the product-use flywheel without external model calls."""
+    import tempfile
+    from src.config import load_config
+    from src.usage_flywheel import UsageFlywheel, UsageTraceStore
+
+    async def _run():
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = load_config(PROJECT_ROOT / "config")
+            cfg.usage_flywheel.trace_dir = str(Path(tmp) / "usage")
+            cfg.usage_flywheel.pending_jsonl = str(Path(tmp) / "pending.jsonl")
+            store = UsageTraceStore(cfg.usage_flywheel.trace_dir)
+            flywheel = UsageFlywheel(cfg, repo_root=PROJECT_ROOT, trace_store=store)
+            result = await flywheel.run_task(
+                "Explain how to run tokagotchi in Codex mode.",
+                dry_run=True,
+                append_pending=True,
+            )
+            assert result.trace.status == "dry_run"
+            assert result.trace.student_status == "skipped"
+            assert result.trace.codex_status == "skipped"
+            assert result.pending_example_path is None
+            assert result.trace_path.exists()
+            assert store.load(result.trace.trace_id).status == "dry_run"
+            return result.trace.trace_id
+
+    trace_id = asyncio.run(_run())
+    return f"Usage flywheel dry-run trace OK: {trace_id}"
+
+
+# ===================================================================
+# Test 18: Codex harness command construction
+# ===================================================================
+
+def test_18_codex_harness_command():
+    """Verify Codex harness command flags without calling Codex."""
+    from src.usage_flywheel.codex_harness import CodexHarness
+
+    harness = CodexHarness(
+        cwd=PROJECT_ROOT,
+        model="gpt-5.6-sol",
+        effort="medium",
+        sandbox="read-only",
+    )
+    cmd = harness.build_command(
+        "Reply OK",
+        output_path=PROJECT_ROOT / "data" / "usage_traces" / "last.txt",
+    )
+    assert cmd[:4] == ["codex", "exec", "--model", "gpt-5.6-sol"]
+    assert "--json" in cmd
+    assert "--output-last-message" in cmd
+    assert "--sandbox" in cmd and "read-only" in cmd
+    assert any("model_reasoning_effort" in arg for arg in cmd)
+    assert harness.build_command("x" * 5000, output_path="/tmp/out.txt")[-1] == "-"
+    return f"Codex harness command OK: {' '.join(cmd[:8])}"
+
+
+# ===================================================================
 # Main
 # ===================================================================
 
@@ -888,6 +1012,9 @@ def main():
         ("Test 13: Curriculum SEC engine", test_13_sec_engine),
         ("Test 14: Pending buffer", test_14_pending_buffer),
         ("Test 15: Pareto tracker", test_15_pareto_tracker),
+        ("Test 16: Usage flywheel store", test_16_usage_flywheel_store),
+        ("Test 17: Usage flywheel dry run", test_17_usage_flywheel_dry_run),
+        ("Test 18: Codex harness command", test_18_codex_harness_command),
     ]
 
     for name, func in tests:

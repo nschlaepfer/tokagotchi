@@ -14,6 +14,7 @@ env/
 
 # Data (large files, generated)
 data/traces/
+data/usage_traces/
 data/checkpoints/
 data/pending.jsonl
 data/opus_sessions/

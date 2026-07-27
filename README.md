@@ -2,13 +2,24 @@
 
 **Raise your own AI on a single GPU.**
 
-tokagotchi is a self-improving AI system that runs on a single RTX 5090 (32GB). It uses Codex GPT-5.6 Sol as the default teacher/judge/reviewer and a local Qwen3.6 27B model as the student. Claude Opus 5 is still supported as an optional provider if you have Claude Code access.
+tokagotchi is a local self-improving AI system built around a product-use data flywheel. You use it on real tasks, the local Qwen3.6 27B student tries first, and Codex GPT-5.6 Sol can rescue failures through the Codex CLI harness. Those local traces become targeted supervision for the student over time.
 
 Think of it as a Tamagotchi for LLMs: you feed it tasks, it learns from its mistakes, and it grows stronger overnight.
 
 ## How It Works
 
-Three training loops run at different timescales, each building on the last:
+The product loop comes first:
+
+1. The user gives tokagotchi a real local task.
+2. The Qwen student attempts it through Ollama.
+3. Tokagotchi records a local trace with task metadata, student output, status, and redaction info.
+4. If the student fails or is unavailable, Codex GPT-5.6 Sol can complete or repair the task.
+5. The selected answer is appended to the existing pending SFT buffer.
+6. GEPA/OmniGEPA-style optimizers use the accumulated traces to improve prompts, harness settings, curriculum, and training filters.
+
+See [docs/PRODUCT_FLYWHEEL.md](docs/PRODUCT_FLYWHEEL.md) for the detailed success criteria and OmniGEPA notes.
+
+Three training loops support that product flywheel:
 
 ### Loop 1 — Prompt Evolution (minutes)
 GEPA-style evolutionary optimization of prompts and context. No weight updates — just finding the best way to talk to your model. The configured teacher model defaults to Codex GPT-5.6 Sol, which analyzes execution traces, diagnoses failures, and proposes targeted mutations. **Forced mutation diversity** cycles through 5 high-impact types (add_example, modify_tool_instructions, strengthen_instruction, add_error_recovery, add_cot_step) to prevent defaulting to shallow rephrasing. Based on [Training-Free GRPO](https://arxiv.org/abs/2503.04644) and [GEPA](https://arxiv.org/abs/2502.02968).
@@ -29,11 +40,19 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Teacher Provider                                   │
-│  Default: Codex GPT-5.6 Sol via codex exec          │
-│  Optional: Claude Opus 5 via claude -p              │
+│  Product Use                                        │
+│  scripts/run_usage_flywheel.py                      │
 └──────────┬────────────────┬───────────────┬─────────┘
            │                │               │
+    ┌──────▼──────┐  ┌──────▼──────┐  ┌────▼────────┐
+    │ Local Trace │  │ Qwen        │  │ Codex Boost │
+    │ Store       │  │ Student     │  │ on Failure  │
+    └──────┬──────┘  └──────┬──────┘  └────┬────────┘
+           │                │               │
+    ┌──────▼────────────────▼───────────────▼─────────┐
+    │ Pending SFT Buffer (real user task supervision)  │
+    └──────────────────────┬──────────────────────────┘
+                           │
     ┌──────▼──────┐  ┌──────▼──────┐  ┌────▼────────┐
     │  Loop 1     │  │  Loop 2     │  │  Loop 3     │
     │  Prompt     │  │  SDPO +     │  │  Tree-GRPO  │
@@ -58,6 +77,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 - **Thinking mode**: Qwen thinking models should run with `think=true` in this harness. The system handles reasoning/thinking fields natively.
 - **Action parser**: Robust multi-format parser handles Qwen's output patterns including `<think>` blocks, orphaned `</think>` tags, bracket-style `[action content]`, and reasoning text before actions.
 - **Subscription auth**: Default teacher calls route through `codex exec`, so normal Codex subscription login is used instead of project-level API keys. If you opt into Claude, calls route through `claude -p`.
+- **Product-use traces**: Real-use traces are written locally under `data/usage_traces/`, redacted for common secret patterns, and ignored by Git.
 - **Sandbox backend**: Auto-detects Docker; falls back to subprocess sandboxes with a `python->python3` shim for Windows/Git Bash compatibility.
 - **Mutation lineage**: Every genome stores its mutation type, teacher diagnosis, rationale, and creation timestamp. Full mutation history logs to `mutation_log.jsonl`.
 - **Trajectory persistence**: Eval results save full step-by-step data (actions, observations, reasoning, rewards) for replay and analysis.
@@ -69,8 +89,8 @@ Verified on 2026-07-27:
 
 | Role | Default | Why |
 |------|---------|-----|
-| Student / local serving | `qwen3.6:27b` | Current open Qwen3.6 dense 27B model with Ollama support; fits a 32GB RTX 5090 in Q4_K_M. See [Qwen3.6-27B](https://qwen.ai/blog?id=qwen3.6-27b) and [Ollama qwen3.6](https://ollama.com/library/qwen3.6). |
-| Teacher / judge / reviewer | `gpt-5.6-sol` with `medium` effort | OpenAI's GPT-5.6 flagship model for complex coding/reasoning. OpenAI lists Sol, Terra, and Luna; this repo defaults to Sol because quality matters more than throughput for mutations, trace surgery, and reviews. See [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model) and [Codex models](https://developers.openai.com/codex/models). |
+| Student / local serving | `qwen3.6:27b` | Current open Qwen3.6 dense 27B model with Ollama support. On this 32GB RTX 5090 setup it was pulled and smoke-tested with `num_ctx=2048`; avoid large contexts until re-tested. See [Ollama qwen3.6](https://ollama.com/library/qwen3.6) and [Qwen3.6-27B on Hugging Face](https://huggingface.co/Qwen/Qwen3.6-27B). |
+| Teacher / judge / reviewer | `gpt-5.6-sol` with `medium` effort | Default Codex teacher path through `codex exec`, using the user's Codex subscription auth. See the [OpenAI Codex CLI docs](https://learn.chatgpt.com/docs/codex/cli) and [Codex repository](https://github.com/openai/codex). |
 | Optional Claude provider | `claude-opus-5` with `high` effort | Kept for users with Claude Code access. To use it, set `opus.provider: "claude"`, `opus.model: "claude-opus-5"`, and `opus.model_reasoning_effort: "high"` in `config/master.yaml`. See [Claude models](https://platform.claude.com/docs/en/about-claude/models/overview) and [Claude Code model settings](https://code.claude.com/docs/en/settings). |
 
 ## Requirements
@@ -79,7 +99,7 @@ Verified on 2026-07-27:
 - **OS**: Windows 11 (Git Bash / MSYS2) — Docker optional
 - **CLI**: Codex CLI logged into your ChatGPT/Codex subscription. Claude Code CLI is optional and only needed if you switch `opus.provider` to `claude`.
 - **Python**: 3.11+
-- **Model**: Pulled via Ollama (`ollama pull qwen3.6:27b`)
+- **Model**: Pulled via Ollama (`ollama pull qwen3.6:27b`). The default config caps local student calls at `num_ctx=2048` for 32GB VRAM stability.
 - **Training**: `pip install unsloth triton-windows`; for LoRA training, download `Qwen/Qwen3.6-27B` to `models/Qwen3.6-27B`
 - **Storage**: ~25GB for Ollama-only use; ~80GB+ if keeping Hugging Face weights and checkpoints for training
 
@@ -99,11 +119,20 @@ codex --version
 # Pull the local student model
 ollama pull qwen3.6:27b
 
+# WSL + Windows Ollama note:
+# if localhost does not resolve from WSL, tokagotchi also tries the WSL gateway automatically.
+
 # Download HF weights for Loop 2 / Loop 3 training
 huggingface-cli download Qwen/Qwen3.6-27B --local-dir models/Qwen3.6-27B
 
 # Run the full self-improving pipeline
 python scripts/run_all.py --config config/ --log-file data/logs/run.log --log-level INFO
+
+# Run one product-use flywheel task
+python scripts/run_usage_flywheel.py "Explain why the latest test failed and propose a fix."
+
+# Dry-run trace collection without Ollama or Codex calls
+python scripts/run_usage_flywheel.py "Check flywheel wiring." --dry-run
 
 # Or run just Loop 1 (prompt evolution, cheapest)
 python scripts/run_loop1.py --iterations 10
@@ -121,6 +150,7 @@ tokagotchi/
 │   ├── loop3_rl/        # RL: Tree-GRPO, DAPO clipping, trajectory filtering
 │   ├── arena/           # Subprocess sandboxes + tools (bash, python, SQL, APIs)
 │   ├── curriculum/      # Self-Evolving Curriculum, task generation, frontier probing
+│   ├── usage_flywheel/  # Real-use traces, redaction, Codex boost, pending examples
 │   ├── rewards/         # Outcome, process (teacher-judged), efficiency, composite
 │   └── infra/           # Ollama server, VRAM scheduler, eval harness, wandb tracker
 ├── paper/               # DGHD paper (LaTeX)

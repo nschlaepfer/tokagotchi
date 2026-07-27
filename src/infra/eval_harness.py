@@ -46,7 +46,7 @@ class EvalHarness:
         tasks:
             Task specifications to run.
         vllm_server:
-            Running VLLMServer instance for Qwen inference.
+            Running local LLM server instance for Qwen inference.
         arena_manager:
             DockerManager for arena containers.
         genome:

@@ -84,7 +84,7 @@ class GEPAEngine:
     opus_client:
         Client for teacher-driven mutation proposals.
     vllm_server:
-        vLLM server for Qwen inference during evaluation.
+        Local LLM server for Qwen inference during evaluation.
     arena_manager:
         Docker manager for arena containers.
     tasks:

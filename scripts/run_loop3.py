@@ -114,7 +114,7 @@ async def main(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-    # Transition to training phase (stop vLLM, free VRAM)
+    # Transition to training phase (stop Ollama serving, free VRAM)
     logger.info("Entering training phase...")
     await vram_scheduler.enter_training_phase()
 

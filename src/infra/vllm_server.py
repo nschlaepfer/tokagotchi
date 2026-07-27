@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ from typing import Any
 import openai
 
 from src.config import ModelConfig
+from src.infra.ollama_utils import ollama_base_urls
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ class LLMServer:
 
         self._status: ServerStatus = ServerStatus.STOPPED
         self._client: openai.AsyncOpenAI | None = None
+        self._active_base_url: str | None = None
 
     # ------------------------------------------------------------------
     # Properties
@@ -62,11 +65,18 @@ class LLMServer:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.config.ollama_host}:{self.config.ollama_port}/v1"
+        return f"{self._ollama_base_url}/v1"
 
     @property
     def api_url(self) -> str:
-        return f"http://{self.config.ollama_host}:{self.config.ollama_port}/api"
+        return f"{self._ollama_base_url}/api"
+
+    @property
+    def _ollama_base_url(self) -> str:
+        return self._active_base_url or ollama_base_urls(
+            self.config.ollama_host,
+            self.config.ollama_port,
+        )[0]
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -202,20 +212,6 @@ class LLMServer:
         )
         return _wrap_native_response(result)
 
-        assert self._client is not None
-        response = await self._client.chat.completions.create(
-            model=self.config.name,
-            messages=messages,  # type: ignore[arg-type]
-            temperature=temperature,
-            max_tokens=max_tokens,
-            stop=stop,
-            top_p=top_p,
-            **kwargs,
-        )
-        # Fix thinking model responses: extract reasoning if content is empty
-        _fix_thinking_response(response)
-        return response
-
     async def chat(
         self,
         messages: list[dict[str, str]],
@@ -279,6 +275,7 @@ class LLMServer:
                 "temperature": temperature,
                 "num_predict": max_tokens,
                 "top_p": top_p,
+                "num_ctx": self.config.ollama_num_ctx,
             },
         }
 
@@ -328,28 +325,41 @@ class LLMServer:
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"http://{self.config.ollama_host}:{self.config.ollama_port}/",
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status == 200:
-                        logger.info("Ollama service is running")
-                        return
+                for base_url in ollama_base_urls(self.config.ollama_host, self.config.ollama_port):
+                    try:
+                        async with session.get(
+                            f"{base_url}/",
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        ) as resp:
+                            if resp.status == 200:
+                                self._active_base_url = base_url
+                                logger.info("Ollama service is running at %s", base_url)
+                                return
+                    except (aiohttp.ClientError, asyncio.TimeoutError):
+                        continue
         except (aiohttp.ClientError, asyncio.TimeoutError):
             pass
 
         # Try to start Ollama service
         logger.info("Ollama not reachable, attempting to start ...")
+        ollama_exe = shutil.which("ollama")
+        if ollama_exe is None:
+            raise RuntimeError(
+                "Ollama is not reachable and 'ollama' is not on PATH. "
+                "If Ollama is running on Windows from WSL, ensure the Windows "
+                "service is reachable on the WSL gateway address."
+            )
+
         if sys.platform == "win32":
             subprocess.Popen(
-                ["ollama", "serve"],
+                [ollama_exe, "serve"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
         else:
             subprocess.Popen(
-                ["ollama", "serve"],
+                [ollama_exe, "serve"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -359,13 +369,18 @@ class LLMServer:
         while time.monotonic() < deadline:
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        f"http://{self.config.ollama_host}:{self.config.ollama_port}/",
-                        timeout=aiohttp.ClientTimeout(total=3),
-                    ) as resp:
-                        if resp.status == 200:
-                            logger.info("Ollama service started")
-                            return
+                    for base_url in ollama_base_urls(self.config.ollama_host, self.config.ollama_port):
+                        try:
+                            async with session.get(
+                                f"{base_url}/",
+                                timeout=aiohttp.ClientTimeout(total=3),
+                            ) as resp:
+                                if resp.status == 200:
+                                    self._active_base_url = base_url
+                                    logger.info("Ollama service started at %s", base_url)
+                                    return
+                        except (aiohttp.ClientError, asyncio.TimeoutError):
+                            continue
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
             await asyncio.sleep(1.0)
@@ -393,16 +408,15 @@ class LLMServer:
                             return
 
         logger.info("Model %s not found locally, pulling ...", self.config.name)
-        proc = await asyncio.create_subprocess_exec(
-            "ollama", "pull", self.config.name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        stdout, _ = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Failed to pull model {self.config.name}: {stdout.decode()}"
-            )
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.api_url}/pull",
+                json={"name": self.config.name, "stream": False},
+                timeout=aiohttp.ClientTimeout(total=max(self.health_timeout, 600.0)),
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"Failed to pull model {self.config.name}: {text}")
         logger.info("Model %s pulled successfully", self.config.name)
 
     async def _warmup_model(self) -> None:
@@ -418,7 +432,7 @@ class LLMServer:
                         "model": self.config.name,
                         "prompt": "Hello",
                         "stream": False,
-                        "options": {"num_predict": 1},
+                        "options": {"num_predict": 1, "num_ctx": self.config.ollama_num_ctx},
                     },
                     timeout=aiohttp.ClientTimeout(total=self.health_timeout),
                 ) as resp:
