@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DOCKER_SOCKET,
         help="Unix Docker socket required for nested proof validation.",
     )
+    parser.add_argument("--skip-codex", action="store_true", help="Skip Codex CLI probing.")
     parser.add_argument("--skip-docker", action="store_true", help="Skip Docker CLI/daemon probing.")
     parser.add_argument("--check-ollama", action="store_true", help="Probe local Ollama tags endpoint.")
     parser.add_argument("--probe-timeout-seconds", type=float, default=5.0)
@@ -57,10 +58,13 @@ def main_sync() -> int:
         _git_check(),
         _gitignore_check("data/usage_traces"),
         _gitignore_check("data/proofs"),
-        _codex_cli_check(args.probe_timeout_seconds),
         _safety_config_check(cfg),
         _gate_evidence_check(cfg),
     ]
+    if args.skip_codex:
+        checks.append(DoctorCheck("codex_cli", "warn", "Codex CLI probe skipped by --skip-codex."))
+    else:
+        checks.append(_codex_cli_check(args.probe_timeout_seconds))
     if args.skip_docker:
         checks.append(DoctorCheck("docker", "warn", "Docker probe skipped by --skip-docker."))
     else:

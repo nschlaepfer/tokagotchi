@@ -312,6 +312,8 @@ def run_inside_container(args: argparse.Namespace) -> int:
     proof_dir = args.proof_dir
     logs_dir = proof_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TOKAGOTCHI_SKIP_EXTERNAL_PROBES", "1")
+    os.environ.setdefault("TOKAGOTCHI_EXTERNAL_PROBE_TIMEOUT_SECONDS", "2")
     task_bank = str(args.task_bank)
     commands = [
         (

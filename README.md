@@ -153,6 +153,9 @@ python scripts/run_usage_flywheel.py "Check flywheel wiring." --dry-run
 # Check local dogfood readiness and safety-gate state
 python scripts/tokagotchi_doctor.py --check-ollama
 
+# Container/CI readiness check without user-local Codex or Docker probes
+python scripts/tokagotchi_doctor.py --skip-codex --skip-docker
+
 # Validate tasks before optimization
 python scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only
 

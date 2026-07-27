@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -32,6 +33,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # ---------------------------------------------------------------------------
 
 _results: list[dict[str, Any]] = []
+
+
+def _external_probes_disabled() -> bool:
+    return os.environ.get("TOKAGOTCHI_SKIP_EXTERNAL_PROBES") == "1"
+
+
+def _external_probe_timeout_seconds(default: float = 120.0) -> float:
+    raw = os.environ.get("TOKAGOTCHI_EXTERNAL_PROBE_TIMEOUT_SECONDS")
+    if raw is None:
+        return default
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return default
 
 
 def _run_test(name: str, func):
@@ -204,6 +219,9 @@ def test_02_models():
 
 def test_03_ollama_inference():
     """Make a chat completion call to Ollama via the openai client."""
+    if _external_probes_disabled():
+        skip("external Ollama probe disabled by TOKAGOTCHI_SKIP_EXTERNAL_PROBES")
+
     try:
         from openai import OpenAI
     except ImportError:
@@ -218,6 +236,7 @@ def test_03_ollama_inference():
     import requests
 
     errors = []
+    timeout = _external_probe_timeout_seconds()
     for api_url in ollama_base_urls(cfg.model.ollama_host, cfg.model.ollama_port):
         try:
             resp = requests.post(
@@ -236,7 +255,7 @@ def test_03_ollama_inference():
                         "num_ctx": cfg.model.ollama_num_ctx,
                     },
                 },
-                timeout=120,
+                timeout=timeout,
             )
             resp.raise_for_status()
             break
@@ -382,36 +401,40 @@ def test_07_gepa_lite():
         cfg = load_config(PROJECT_ROOT / "config")
 
         try:
-            import requests as _req
-            for api_url in ollama_base_urls(cfg.model.ollama_host, cfg.model.ollama_port):
-                try:
-                    resp = _req.post(
-                        f"{api_url}/api/chat",
-                        json={
-                            "model": cfg.model.name,
-                            "messages": [
-                                {"role": "system", "content": genome.to_system_message()[:500]},
-                                {"role": "user", "content": "What is the first step to fix a failing Python test?"},
-                            ],
-                            "stream": False,
-                            "think": False,
-                            "options": {
-                                "num_predict": 100,
-                                "temperature": 0.7,
-                                "num_ctx": cfg.model.ollama_num_ctx,
-                            },
-                        },
-                        timeout=120,
-                    )
-                    resp.raise_for_status()
-                    break
-                except Exception:
-                    continue
+            if _external_probes_disabled():
+                ollama_ok = False
             else:
-                raise RuntimeError("Ollama not reachable at configured endpoints")
-            ollama_answer = resp.json().get("message", {}).get("content", "")
-            assert len(ollama_answer) > 0, "Empty Ollama response"
-            ollama_ok = True
+                import requests as _req
+                timeout = _external_probe_timeout_seconds()
+                for api_url in ollama_base_urls(cfg.model.ollama_host, cfg.model.ollama_port):
+                    try:
+                        resp = _req.post(
+                            f"{api_url}/api/chat",
+                            json={
+                                "model": cfg.model.name,
+                                "messages": [
+                                    {"role": "system", "content": genome.to_system_message()[:500]},
+                                    {"role": "user", "content": "What is the first step to fix a failing Python test?"},
+                                ],
+                                "stream": False,
+                                "think": False,
+                                "options": {
+                                    "num_predict": 100,
+                                    "temperature": 0.7,
+                                    "num_ctx": cfg.model.ollama_num_ctx,
+                                },
+                            },
+                            timeout=timeout,
+                        )
+                        resp.raise_for_status()
+                        break
+                    except Exception:
+                        continue
+                else:
+                    raise RuntimeError("Ollama not reachable at configured endpoints")
+                ollama_answer = resp.json().get("message", {}).get("content", "")
+                assert len(ollama_answer) > 0, "Empty Ollama response"
+                ollama_ok = True
         except Exception:
             ollama_ok = False
 
@@ -1669,6 +1692,7 @@ def test_27_tokagotchi_doctor():
             [
                 sys.executable,
                 "scripts/tokagotchi_doctor.py",
+                "--skip-codex",
                 "--skip-docker",
                 "--json-out",
                 str(json_out),

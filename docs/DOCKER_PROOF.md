@@ -55,6 +55,13 @@ Check readiness first:
 python3 scripts/tokagotchi_doctor.py --check-ollama
 ```
 
+Inside CI/proof containers, do not require user-local tools such as a logged-in
+Codex CLI or local Ollama service. Use explicit skip flags for that environment:
+
+```bash
+python3 scripts/tokagotchi_doctor.py --skip-codex --skip-docker
+```
+
 ## WSL with Windows Docker Desktop
 
 If WSL integration is not enabled but Docker Desktop is installed on Windows, you can point the runner at `docker.exe`:
@@ -73,6 +80,11 @@ If only `docker.exe` is present but `/var/run/docker.sock` is missing, the runne
 This repo includes `.github/workflows/docker-proof.yml`. On GitHub-hosted Ubuntu runners, Docker and `/var/run/docker.sock` are available by default, so the workflow can run the proof gate without depending on local Docker Desktop state.
 
 The workflow uploads `data/proofs/docker_gate/` as an artifact. The generated `truth_gate_candidate.json` still requires human review before any local safety flags are changed.
+
+The proof runner sets `TOKAGOTCHI_SKIP_EXTERNAL_PROBES=1` inside the proof
+container so the integration suite verifies local wiring and safety gates
+without waiting on user-local Ollama/Codex services that GitHub Actions should
+not possess.
 
 ## Dry-run the command plan
 
