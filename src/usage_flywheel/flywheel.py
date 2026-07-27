@@ -15,7 +15,8 @@ from src.infra.ollama_utils import ollama_api_urls
 from src.usage_flywheel.codex_harness import CodexHarness, CodexHarnessResult
 from src.usage_flywheel.models import UsageTrace
 from src.usage_flywheel.redaction import redact_text
-from src.usage_flywheel.store import UsageTraceStore, append_pending_example
+from src.usage_flywheel.feedback import trace_trainability
+from src.usage_flywheel.store import UsageTraceStore
 
 
 @dataclass
@@ -45,7 +46,7 @@ class FlywheelResult:
 
 
 class UsageFlywheel:
-    """Run the local usage trace -> Codex boost -> pending-example loop."""
+    """Run the local usage trace -> Codex boost -> explicit-review loop."""
 
     def __init__(
         self,
@@ -66,7 +67,7 @@ class UsageFlywheel:
         skip_student: bool = False,
         codex_boost: str | None = None,
         write: bool = False,
-        append_pending: bool = True,
+        append_pending: bool = False,
     ) -> FlywheelResult:
         """Run one user task through the product-use flywheel.
 
@@ -160,24 +161,28 @@ class UsageFlywheel:
             trace.codex_status = "skipped"
             trace.add_event("codex_boost_skipped", f"Boost policy is {boost_policy}.")
 
-        pending_path: Path | None = None
         selected_answer = trace.codex_output if trace.boost_used else trace.student_output
-        if append_pending and selected_answer.strip():
-            example, metadata = build_training_example(trace, selected_answer)
-            pending_path = append_pending_example(
-                self.config.usage_flywheel.pending_jsonl,
-                example=example,
-                metadata=metadata,
+        if selected_answer.strip():
+            trace.selected_output = selected_answer
+            trace.add_event(
+                "selected_output",
+                "",
+                source="codex" if trace.boost_used else "student",
             )
-            trace.pending_example_path = str(pending_path)
-            trace.add_event("pending_example", str(pending_path), **metadata)
+        if append_pending:
+            trace.add_event(
+                "pending_skipped",
+                "Usage traces require explicit user acceptance before promotion.",
+                reason="not_accepted",
+            )
+        trace.metadata["trainability"] = trace_trainability(trace).to_dict()
 
         trace.status = _final_status(trace)
         trace_path = self.trace_store.save(trace)
         return FlywheelResult(
             trace=trace,
             trace_path=trace_path,
-            pending_example_path=pending_path,
+            pending_example_path=None,
             student_attempt=student_attempt,
             codex_result=codex_result,
         )
@@ -275,6 +280,10 @@ def build_training_example(trace: UsageTrace, selected_answer: str) -> tuple[dic
         "teacher_model": trace.teacher_model,
         "boosted_by_codex": trace.boost_used,
         "privacy_mode": trace.privacy_mode,
+        "review_status": trace.review_status,
+        "usefulness_rating": trace.usefulness_rating,
+        "is_sensitive": trace.is_sensitive,
+        "is_private": trace.is_private,
         "created_at": trace.created_at,
     }
     return example, metadata
@@ -304,6 +313,14 @@ def _redact_if_enabled(text: str, *, enabled: bool) -> str:
 
 
 def _final_status(trace: UsageTrace) -> str:
+    if trace.pending_example_path:
+        return "promoted"
+    if trace.review_status == "accepted":
+        return "accepted"
+    if trace.review_status == "rejected":
+        return "rejected"
+    if trace.selected_answer().strip():
+        return "needs_review"
     if trace.boost_used:
         return "boosted"
     if trace.student_status == "ok":

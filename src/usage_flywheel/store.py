@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any
@@ -51,20 +52,31 @@ class UsageTraceStore:
         return trace
 
     def latest(self, n: int = 10) -> list[dict[str, Any]]:
-        """Return the latest compact trace summaries."""
+        """Return the latest unique compact trace summaries."""
 
         if not self.index_path.exists():
             return []
         lines = [line for line in self.index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         rows: list[dict[str, Any]] = []
-        for line in lines[-n:]:
+        seen: set[str] = set()
+        for line in reversed(lines):
             try:
-                rows.append(json.loads(line))
+                row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            trace_id = str(row.get("trace_id", ""))
+            if not trace_id or trace_id in seen:
+                continue
+            seen.add(trace_id)
+            rows.append(row)
+            if len(rows) >= n:
+                break
+        rows.reverse()
         return rows
 
     def path_for(self, trace_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", trace_id):
+            raise ValueError(f"Invalid trace id: {trace_id!r}")
         return self.trace_dir / f"{trace_id}.json"
 
 

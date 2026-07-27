@@ -12,8 +12,9 @@ The product loop is:
 2. The local student model tries the task first.
 3. Tokagotchi records a local trace: task, repo metadata, student output, status, and later feedback.
 4. If the student fails, stalls, or is unavailable, Codex GPT-5.6 Sol can rescue the task through `codex exec`.
-5. The rescued result becomes a high-quality local supervision example.
-6. GEPA/OmniGEPA-style optimizers use these traces to improve prompts, harness settings, curriculum, and eventually LoRA/RL training data.
+5. The trace waits for user feedback: accept, reject, edit, mark private/sensitive, and rate usefulness.
+6. Only accepted, non-private, useful traces are promoted into the pending SFT buffer.
+7. GEPA/OmniGEPA-style optimizers use reviewed traces to improve prompts, harness settings, curriculum, and eventually LoRA/RL training data.
 
 The point is not to collect random chat logs. The point is to collect structured examples where a weaker local model attempted real work and a stronger harness produced a better outcome.
 
@@ -25,9 +26,11 @@ The first product-use slice lives in `src/usage_flywheel/`:
 - `redaction.py` redacts common secret/token patterns before persistence.
 - `store.py` writes full traces under `data/usage_traces/traces/` and an append-only `usage_index.jsonl`.
 - `codex_harness.py` wraps the installed open-source Codex CLI harness through `codex exec`.
-- `flywheel.py` runs the local student attempt, optional Codex boost, and pending-buffer export.
+- `feedback.py` applies accept/reject/edit/private/sensitive/rating feedback and gates promotion.
+- `flywheel.py` runs the local student attempt, optional Codex boost, and records a trace for review.
 - `src/infra/ollama_utils.py` resolves Ollama endpoints and falls back from WSL `localhost` to the Windows host gateway when needed.
-- `scripts/run_usage_flywheel.py` is the CLI entry point.
+- `scripts/run_usage_flywheel.py` records a task trace.
+- `scripts/review_usage_trace.py` lists, reviews, explains trainability, and promotes accepted traces.
 
 Generated traces are ignored by Git by default because they may contain user work, repo context, or private task details.
 
@@ -76,6 +79,8 @@ Run the local student first, then let Codex rescue only if the student fails or 
 python scripts/run_usage_flywheel.py "Fix the failing unit test and explain the change."
 ```
 
+The command prints a `trace_id`, `trainability_reason`, and next review command. New traces are not appended to training data yet.
+
 The default local student request uses `num_ctx=2048`. This is intentional for 32GB VRAM stability with `qwen3.6:27b`; raise it only after a fresh smoke test passes.
 
 Skip the local student and use Codex as the boosted teacher for a trace:
@@ -90,9 +95,34 @@ Allow Codex to write in the workspace for that task:
 python scripts/run_usage_flywheel.py "Update the docs for the flywheel." --skip-student --codex-boost always --write
 ```
 
+Review recent traces:
+
+```bash
+python scripts/review_usage_trace.py list
+python scripts/review_usage_trace.py show TRACE_ID
+python scripts/review_usage_trace.py trainability TRACE_ID
+```
+
+Accept, edit, reject, rate, or mark a trace private/sensitive:
+
+```bash
+python scripts/review_usage_trace.py accept TRACE_ID --rating 5 --promote
+python scripts/review_usage_trace.py edit TRACE_ID --answer-file improved_answer.md
+python scripts/review_usage_trace.py reject TRACE_ID --note "Wrong or not useful"
+python scripts/review_usage_trace.py private TRACE_ID --note "Contains private work"
+python scripts/review_usage_trace.py sensitive TRACE_ID --note "Contains secrets or sensitive context"
+python scripts/review_usage_trace.py rate TRACE_ID 4
+```
+
 ## How this feeds training
 
-When a usable student or Codex answer exists, the flywheel appends one chat-format example to the pending SFT buffer:
+When a usable student or Codex answer exists, the flywheel stores it as `selected_output` and marks the trace `needs_review`. Promotion into the pending SFT buffer is separate:
+
+```bash
+python scripts/review_usage_trace.py promote TRACE_ID
+```
+
+Promotion refuses unreviewed, rejected, private, sensitive, low-rated, or answerless traces and prints the reason. Accepted traces append one chat-format example to the pending SFT buffer:
 
 ```json
 {
@@ -107,12 +137,15 @@ When a usable student or Codex answer exists, the flywheel appends one chat-form
     "source": "usage_flywheel",
     "trace_id": "...",
     "task_type": "real_user_task",
-    "boosted_by_codex": true
+    "boosted_by_codex": true,
+    "review_status": "accepted",
+    "usefulness_rating": 5,
+    "trainability_reason": "accepted"
   }
 }
 ```
 
-That keeps the existing Loop 2 pending-buffer shape. Autonomous SFT is now blocked by safety gates until task validation and truth-grounding evidence pass. The next product hardening step is adding explicit user accept/reject feedback before any trace is eligible for training.
+That keeps the existing Loop 2 pending-buffer shape. Autonomous SFT is still blocked by safety gates until Docker-backed task validation and truth-grounding evidence pass.
 
 ## OmniGEPA research notes
 
@@ -146,11 +179,14 @@ This goal is not complete when the code merely runs once. Success means:
 3. Codex GPT-5.6 Sol is the default boosted teacher path.
 4. Claude Code / Opus remains available only as an optional provider.
 5. A trace is persisted locally with repo metadata, statuses, events, redaction info, and selected output.
-6. A usable answer can become a pending SFT example in the existing Loop 2 format.
-7. Generated traces are not committed.
-8. Tests cover trace persistence, redaction, dry-run behavior, and Codex harness command construction.
-9. The default Qwen model is actually pulled and smoke-tested locally, or the exact blocker is recorded.
-10. The docs state what is local, what is sent to Codex, and what remains future work.
+6. A usable answer cannot enter the pending SFT buffer until the user accepts it.
+7. A user can reject, edit, mark private/sensitive, and rate traces.
+8. Every trace can explain why it is or is not trainable.
+9. Accepted traces can become pending SFT examples in the existing Loop 2 format.
+10. Generated traces are not committed.
+11. Tests cover trace persistence, redaction, dry-run behavior, feedback controls, promotion gating, and Codex harness command construction.
+12. The default Qwen model is actually pulled and smoke-tested locally, or the exact blocker is recorded.
+13. The docs state what is local, what is sent to Codex, and what remains future work.
 
 ## Validation status on 2026-07-27
 
@@ -158,18 +194,15 @@ This goal is not complete when the code merely runs once. Success means:
 - A first unbounded smoke test failed with CUDA out-of-memory during model startup.
 - A bounded smoke test with `num_ctx=2048`, `num_predict=16`, and `temperature=0` returned `TOKA_QWEN_OK`.
 - In WSL, `localhost:11434` was not reachable, but the Windows host gateway `172.24.224.1:11434` was reachable. The code now tries that gateway automatically after the configured localhost endpoint.
-- The integration suite passed with 18 passes, 1 skip, and 0 failures. The only skip was the DAPO clipper because PyTorch was not installed in the lightweight validation venv.
+- The integration suite now includes feedback/promotion controls; rerun `scripts/test_all_loops.py` after changing this flow.
 - Direct flywheel smokes passed for both the local student path (`TOKA_FLYWHEEL_OK`) and the Codex boost path (`TOKA_CODEX_FLYWHEEL_OK`).
 - The Ollama-backed compatibility server passed a start/chat/stop smoke through the WSL gateway (`TOKA_SERVER_OK`).
 
 ## Future work
 
-- Add explicit user feedback: accept, reject, edit, rate.
 - Add per-task context manifests so file content is captured intentionally, not accidentally.
 - Store Codex JSONL event streams in a compact normalized form.
 - Add an OmniGEPA adapter that optimizes flywheel configuration and training-example filters.
-- Add explicit user accept/reject/edit feedback so only accepted traces move from `pending` to training.
-- Repair the seed task bank so it passes `scripts/validate_task_bank.py`.
 - Evaluate post-training deltas on held-out real-use traces, not only synthetic tasks.
 
 ## References

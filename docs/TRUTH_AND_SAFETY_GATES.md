@@ -135,8 +135,8 @@ Example evidence shape:
   },
   "tests": {
     "suite": "scripts/test_all_loops.py",
-    "total": 26,
-    "passed": 25,
+    "total": 27,
+    "passed": 26,
     "failures": 0,
     "skipped": 1
   },
@@ -181,7 +181,7 @@ Results:
 
 - Compile: passed.
 - Whitespace diff check: passed.
-- Integration suite: 26 total, 25 pass, 1 skip, 0 fail.
+- Integration suite: 27 total, 26 pass, 1 skip, 0 fail.
 - Skip reason: PyTorch was not installed for the DAPO clipper test in the lightweight validation environment.
 - Current seed task bank before repair: failed validation, as expected.
   - 4/20 tasks were statically valid.
@@ -196,4 +196,4 @@ That failed seed-bank validation is intentional proof that the validator catches
 - Docker-backed executable validation still needs to be run on a machine with the arena image and daemon available.
 - Docker runtime hardening should be exercised on a machine with the arena image and daemon available; current tests prove fail-closed behavior and host-subprocess containment.
 - Loop 3 RL math/checkpoint quality is not scientifically revalidated; it is gated off.
-- Product-use trace acceptance still needs explicit user accept/reject/edit feedback before promotion into training data.
+- Product-use trace feedback controls are currently CLI-based; a richer UI can come later, but pending-buffer promotion is now gated by explicit acceptance.

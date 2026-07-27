@@ -37,6 +37,11 @@ class UsageTrace:
     git_dirty: bool = False
     privacy_mode: str = "local-only"
     training_consent: str = "local_training_only"
+    review_status: str = "unreviewed"
+    feedback_note: str = ""
+    usefulness_rating: int | None = None
+    is_sensitive: bool = False
+    is_private: bool = False
     redaction_report: dict[str, Any] = field(default_factory=dict)
     student_model: str = ""
     teacher_provider: str = "codex"
@@ -47,6 +52,7 @@ class UsageTrace:
     codex_status: str = "not_run"
     boost_used: bool = False
     failure_mode: str = ""
+    selected_output: str = ""
     score: float | None = None
     evaluator_feedback: str = ""
     pending_example_path: str = ""
@@ -60,6 +66,15 @@ class UsageTrace:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def selected_answer(self) -> str:
+        """Return the current candidate answer for training, if any."""
+
+        if self.selected_output.strip():
+            return self.selected_output
+        if self.boost_used and self.codex_output.strip():
+            return self.codex_output
+        return self.student_output
+
     def summary(self) -> dict[str, Any]:
         return {
             "trace_id": self.trace_id,
@@ -71,6 +86,10 @@ class UsageTrace:
             "git_commit": self.git_commit,
             "git_dirty": self.git_dirty,
             "privacy_mode": self.privacy_mode,
+            "review_status": self.review_status,
+            "usefulness_rating": self.usefulness_rating,
+            "is_sensitive": self.is_sensitive,
+            "is_private": self.is_private,
             "student_model": self.student_model,
             "student_status": self.student_status,
             "teacher_provider": self.teacher_provider,
@@ -80,5 +99,6 @@ class UsageTrace:
             "failure_mode": self.failure_mode,
             "score": self.score,
             "pending_example_path": self.pending_example_path,
+            "trainability": self.metadata.get("trainability", {}),
             "user_task_preview": self.user_task[:240],
         }

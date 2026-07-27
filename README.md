@@ -14,8 +14,9 @@ The product loop comes first:
 2. The Qwen student attempts it through Ollama.
 3. Tokagotchi records a local trace with task metadata, student output, status, and redaction info.
 4. If the student fails or is unavailable, Codex GPT-5.6 Sol can complete or repair the task.
-5. The selected answer is appended to the existing pending SFT buffer.
-6. GEPA/OmniGEPA-style optimizers use the accumulated traces to improve prompts, harness settings, curriculum, and training filters.
+5. The trace stays unreviewed until the user accepts, rejects, edits, rates, or marks it private/sensitive.
+6. Only accepted, non-private, useful traces can be promoted into the pending SFT buffer.
+7. GEPA/OmniGEPA-style optimizers use the reviewed traces to improve prompts, harness settings, curriculum, and training filters.
 
 See [docs/PRODUCT_FLYWHEEL.md](docs/PRODUCT_FLYWHEEL.md) for the detailed success criteria and OmniGEPA notes.
 
@@ -43,7 +44,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 ```
 ┌─────────────────────────────────────────────────────┐
 │  Product Use                                        │
-│  scripts/run_usage_flywheel.py                      │
+│  scripts/run_usage_flywheel.py + review_usage_trace │
 └──────────┬────────────────┬───────────────┬─────────┘
            │                │               │
     ┌──────▼──────┐  ┌──────▼──────┐  ┌────▼────────┐
@@ -52,6 +53,10 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
     └──────┬──────┘  └──────┬──────┘  └────┬────────┘
            │                │               │
     ┌──────▼────────────────▼───────────────▼─────────┐
+    │ User Feedback Gate (accept/reject/edit/rate)     │
+    └──────────────────────┬──────────────────────────┘
+                           │ accepted only
+    ┌──────────────────────▼──────────────────────────┐
     │ Pending SFT Buffer (real user task supervision)  │
     └──────────────────────┬──────────────────────────┘
                            │
@@ -79,7 +84,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 - **Thinking mode**: Qwen thinking models should run with `think=true` in this harness. The system handles reasoning/thinking fields natively.
 - **Action parser**: Robust multi-format parser handles Qwen's output patterns including `<think>` blocks, orphaned `</think>` tags, bracket-style `[action content]`, and reasoning text before actions.
 - **Subscription auth**: Default teacher calls route through `codex exec`, so normal Codex subscription login is used instead of project-level API keys. If you opt into Claude, calls route through `claude -p`.
-- **Product-use traces**: Real-use traces are written locally under `data/usage_traces/`, redacted for common secret patterns, and ignored by Git.
+- **Product-use traces**: Real-use traces are written locally under `data/usage_traces/`, redacted for common secret patterns, ignored by Git, and blocked from training until accepted through feedback controls.
 - **Sandbox backend**: Arena loops require Docker by default and fail closed if Docker is unavailable. Host subprocess execution is dev-only and requires `--unsafe-host-code-execution`.
 - **Canonical judge**: `TaskJudge` is the single success authority. A `submit` action is not success unless the task oracle passes.
 - **Mutation lineage**: Every genome stores its mutation type, teacher diagnosis, rationale, and creation timestamp. Full mutation history logs to `mutation_log.jsonl`.
@@ -135,6 +140,10 @@ python scripts/run_all.py --config config/ --log-file data/logs/run.log --log-le
 # Run one product-use flywheel task
 python scripts/run_usage_flywheel.py "Explain why the latest test failed and propose a fix."
 
+# Review and promote a useful trace
+python scripts/review_usage_trace.py list
+python scripts/review_usage_trace.py accept TRACE_ID --rating 5 --promote
+
 # Dry-run trace collection without Ollama or Codex calls
 python scripts/run_usage_flywheel.py "Check flywheel wiring." --dry-run
 
@@ -157,7 +166,7 @@ tokagotchi/
 │   ├── loop3_rl/        # RL: Tree-GRPO, DAPO clipping, trajectory filtering
 │   ├── arena/           # Docker/explicit-dev sandboxes + tools (bash, python, SQL, APIs)
 │   ├── curriculum/      # Self-Evolving Curriculum, task generation, frontier probing
-│   ├── usage_flywheel/  # Real-use traces, redaction, Codex boost, pending examples
+│   ├── usage_flywheel/  # Real-use traces, redaction, Codex boost, feedback controls
 │   ├── rewards/         # Outcome, process (teacher-judged), efficiency, composite
 │   └── infra/           # Ollama server, VRAM scheduler, eval harness, wandb tracker
 ├── paper/               # DGHD paper (LaTeX)

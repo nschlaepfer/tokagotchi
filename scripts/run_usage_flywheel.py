@@ -12,14 +12,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import load_config  # noqa: E402
-from src.usage_flywheel import UsageFlywheel, UsageTraceStore  # noqa: E402
+from src.usage_flywheel import UsageFlywheel, UsageTraceStore, trace_trainability  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Record one local user task, optionally try the local Qwen student, "
-            "optionally boost with Codex, and append the result to the pending SFT buffer."
+            "optionally boost with Codex, and save it for explicit user review."
         )
     )
     parser.add_argument("task", nargs="*", help="User task text. Use --task-file for longer tasks.")
@@ -35,7 +35,11 @@ def parse_args() -> argparse.Namespace:
         help="Override Codex boost policy for this task.",
     )
     parser.add_argument("--write", action="store_true", help="Allow Codex workspace-write sandbox for this task.")
-    parser.add_argument("--no-pending", action="store_true", help="Do not append a training example.")
+    parser.add_argument(
+        "--no-pending",
+        action="store_true",
+        help="Deprecated no-op. Usage traces are never appended before review.",
+    )
     return parser.parse_args()
 
 
@@ -64,18 +68,23 @@ async def main_async() -> int:
         skip_student=args.skip_student,
         codex_boost=args.codex_boost,
         write=args.write,
-        append_pending=not args.no_pending,
+        append_pending=False,
     )
 
     trace = result.trace
+    trainability = trace_trainability(trace)
     print(f"trace_id: {trace.trace_id}")
     print(f"status: {trace.status}")
     print(f"student_status: {trace.student_status}")
     print(f"codex_status: {trace.codex_status}")
     print(f"boost_used: {trace.boost_used}")
+    print(f"trainable: {trainability.trainable}")
+    print(f"trainability_reason: {trainability.reason}")
     print(f"trace_path: {result.trace_path}")
-    if result.pending_example_path:
-        print(f"pending_example_path: {result.pending_example_path}")
+    print(
+        "review_next: "
+        f"python scripts/review_usage_trace.py accept {trace.trace_id} --rating 5 --promote"
+    )
     return 0 if trace.status not in {"codex_error"} else 1
 
 

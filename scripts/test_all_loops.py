@@ -103,6 +103,7 @@ def test_00_imports():
     import src.orchestrator.safety_gates
     import src.usage_flywheel
     import src.usage_flywheel.codex_harness
+    import src.usage_flywheel.feedback
     import src.usage_flywheel.flywheel
     import src.usage_flywheel.redaction
     import src.usage_flywheel.store
@@ -916,6 +917,16 @@ def test_16_usage_flywheel_store():
         assert loaded.trace_id == trace.trace_id
         assert loaded.events[0].event_type == "user_task"
         assert store.latest(1)[0]["trace_id"] == trace.trace_id
+        trace.status = "updated"
+        store.save(trace)
+        latest = store.latest(10)
+        assert len([row for row in latest if row["trace_id"] == trace.trace_id]) == 1
+        assert latest[-1]["status"] == "updated"
+        try:
+            store.load("../escape")
+            raise AssertionError("Expected unsafe trace id rejection")
+        except ValueError:
+            pass
 
         pending_path = append_pending_example(
             Path(tmp) / "pending.jsonl",
@@ -954,6 +965,7 @@ def test_17_usage_flywheel_dry_run():
             assert result.trace.codex_status == "skipped"
             assert result.pending_example_path is None
             assert result.trace_path.exists()
+            assert not Path(cfg.usage_flywheel.pending_jsonl).exists()
             assert store.load(result.trace.trace_id).status == "dry_run"
             return result.trace.trace_id
 
@@ -962,10 +974,97 @@ def test_17_usage_flywheel_dry_run():
 
 
 # ===================================================================
-# Test 18: Codex harness command construction
+# Test 18: Usage flywheel feedback controls
 # ===================================================================
 
-def test_18_codex_harness_command():
+def test_18_usage_flywheel_feedback_controls():
+    """Accepted non-private traces promote; rejected/private/low-rated traces do not."""
+    import tempfile
+
+    from src.usage_flywheel.feedback import (
+        apply_trace_feedback,
+        promote_trace_to_pending,
+        trace_trainability,
+    )
+    from src.usage_flywheel.models import UsageTrace
+    from src.usage_flywheel.store import UsageTraceStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        usage_dir = Path(tmp) / "usage"
+        pending_path = Path(tmp) / "pending.jsonl"
+        store = UsageTraceStore(usage_dir)
+
+        trace = UsageTrace(
+            user_task="Explain the failing test.",
+            student_output="Initial weaker answer",
+            selected_output="Initial weaker answer",
+            student_status="ok",
+        )
+        store.save(trace)
+        first = trace_trainability(trace)
+        assert not first.trainable
+        assert first.reason == "not_accepted"
+
+        apply_trace_feedback(
+            trace,
+            decision="accepted",
+            rating=5,
+            selected_output="Edited high-quality answer",
+            note="Useful after edit.",
+        )
+        store.save(trace)
+        accepted = trace_trainability(store.load(trace.trace_id))
+        assert accepted.trainable, accepted
+
+        result = promote_trace_to_pending(store, trace.trace_id, pending_path)
+        assert result.promoted
+        assert pending_path.read_text(encoding="utf-8").count("\n") == 1
+        record = json.loads(pending_path.read_text(encoding="utf-8").strip())
+        assert record["example"]["messages"][-1]["content"] == "Edited high-quality answer"
+        assert record["metadata"]["review_status"] == "accepted"
+        assert store.load(trace.trace_id).status == "promoted"
+        duplicate = promote_trace_to_pending(store, trace.trace_id, pending_path)
+        assert not duplicate.promoted
+        assert duplicate.trainability.reason == "already_promoted"
+        assert pending_path.read_text(encoding="utf-8").count("\n") == 1
+
+        rejected = UsageTrace(user_task="Bad trace", selected_output="bad")
+        apply_trace_feedback(rejected, decision="rejected", rating=5)
+        store.save(rejected)
+        rejected_result = promote_trace_to_pending(store, rejected.trace_id, pending_path)
+        assert not rejected_result.promoted
+        assert rejected_result.trainability.reason == "rejected"
+
+        private = UsageTrace(user_task="Private trace", selected_output="private")
+        apply_trace_feedback(private, decision="accepted", rating=5, mark_private=True)
+        store.save(private)
+        private_result = promote_trace_to_pending(store, private.trace_id, pending_path)
+        assert not private_result.promoted
+        assert private_result.trainability.reason == "marked_private"
+
+        sensitive = UsageTrace(user_task="Sensitive trace", selected_output="secret")
+        apply_trace_feedback(sensitive, decision="accepted", rating=5, mark_sensitive=True)
+        store.save(sensitive)
+        sensitive_result = promote_trace_to_pending(store, sensitive.trace_id, pending_path)
+        assert not sensitive_result.promoted
+        assert sensitive_result.trainability.reason == "marked_sensitive"
+
+        low = UsageTrace(user_task="Low usefulness", selected_output="meh")
+        apply_trace_feedback(low, decision="accepted", rating=2)
+        store.save(low)
+        low_result = promote_trace_to_pending(store, low.trace_id, pending_path)
+        assert not low_result.promoted
+        assert low_result.trainability.reason == "usefulness_rating_too_low"
+        assert pending_path.read_text(encoding="utf-8").count("\n") == 1
+
+    return "Usage feedback gates promote only accepted, useful, non-private traces"
+
+
+# ===================================================================
+# Test 19: Codex harness command construction
+# ===================================================================
+
+def test_19_codex_harness_command():
     """Verify Codex harness command flags without calling Codex."""
     from src.usage_flywheel.codex_harness import CodexHarness
 
@@ -1376,8 +1475,8 @@ def _truth_gate_evidence(*, arena_backend: str) -> dict[str, Any]:
         },
         "tests": {
             "suite": "scripts/test_all_loops.py",
-            "total": 26,
-            "passed": 25,
+            "total": 27,
+            "passed": 26,
             "failures": 0,
             "skipped": 1,
         },
@@ -1532,14 +1631,15 @@ def main():
         ("Test 15: Pareto tracker", test_15_pareto_tracker),
         ("Test 16: Usage flywheel store", test_16_usage_flywheel_store),
         ("Test 17: Usage flywheel dry run", test_17_usage_flywheel_dry_run),
-        ("Test 18: Codex harness command", test_18_codex_harness_command),
-        ("Test 19: Arena fail-closed", test_19_arena_fail_closed),
-        ("Test 20: Subprocess containment", test_20_subprocess_containment),
-        ("Test 21: TaskJudge oracle", test_21_task_judge_oracle),
-        ("Test 22: Task-bank validator", test_22_task_bank_validator),
-        ("Test 23: Autonomous safety gates", test_23_autonomous_safety_gates),
-        ("Test 24: Teacher-generated oracle gate", test_24_teacher_generated_oracle_gate),
-        ("Test 25: Strict benchmark loading", test_25_strict_benchmark_loading),
+        ("Test 18: Usage flywheel feedback controls", test_18_usage_flywheel_feedback_controls),
+        ("Test 19: Codex harness command", test_19_codex_harness_command),
+        ("Test 20: Arena fail-closed", test_19_arena_fail_closed),
+        ("Test 21: Subprocess containment", test_20_subprocess_containment),
+        ("Test 22: TaskJudge oracle", test_21_task_judge_oracle),
+        ("Test 23: Task-bank validator", test_22_task_bank_validator),
+        ("Test 24: Autonomous safety gates", test_23_autonomous_safety_gates),
+        ("Test 25: Teacher-generated oracle gate", test_24_teacher_generated_oracle_gate),
+        ("Test 26: Strict benchmark loading", test_25_strict_benchmark_loading),
     ]
 
     for name, func in tests:
