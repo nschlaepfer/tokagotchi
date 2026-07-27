@@ -60,6 +60,23 @@ def parse_args() -> argparse.Namespace:
         help="Path to task JSON file (overrides seed_tasks.json)",
     )
     parser.add_argument(
+        "--allow-unvalidated-tasks",
+        action="store_true",
+        help="Allow task banks that fail static oracle validation. Unsafe; dev only.",
+    )
+    parser.add_argument(
+        "--sandbox",
+        type=str,
+        default="auto",
+        choices=["docker", "subprocess", "auto"],
+        help="Arena sandbox backend. subprocess requires --unsafe-host-code-execution.",
+    )
+    parser.add_argument(
+        "--unsafe-host-code-execution",
+        action="store_true",
+        help="Allow explicit host subprocess arena execution. Unsafe; local tests only.",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
@@ -76,7 +93,10 @@ async def main(args: argparse.Namespace) -> None:
     # Load evaluation tasks
     harness = EvalHarness()
     task_path = args.tasks or str(data_dir / "curriculum" / "seed_tasks.json")
-    tasks = harness.load_benchmark_tasks(task_path)
+    tasks = harness.load_benchmark_tasks(
+        task_path,
+        require_valid=not args.allow_unvalidated_tasks,
+    )
     if not tasks:
         logger.error("No tasks loaded from %s — aborting", task_path)
         sys.exit(1)
@@ -90,7 +110,15 @@ async def main(args: argparse.Namespace) -> None:
     )
     opus_client = OpusClient(config=cfg.opus, budget_tracker=budget_tracker)
     vllm_server = VLLMServer(cfg.model)
-    arena_manager = create_arena_manager()
+    use_docker = None
+    if args.sandbox == "docker":
+        use_docker = True
+    elif args.sandbox == "subprocess":
+        use_docker = False
+    arena_manager = create_arena_manager(
+        use_docker=use_docker,
+        allow_unsafe_host_execution=args.unsafe_host_code_execution,
+    )
 
     # Start the Ollama-backed LLM server
     logger.info("Starting Ollama-backed LLM server...")

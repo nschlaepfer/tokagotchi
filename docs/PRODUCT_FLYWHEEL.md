@@ -112,7 +112,7 @@ When a usable student or Codex answer exists, the flywheel appends one chat-form
 }
 ```
 
-That keeps the existing Loop 2 pending-buffer shape. The next hardening step is adding explicit user accept/reject feedback before promotion to training.
+That keeps the existing Loop 2 pending-buffer shape. Autonomous SFT is now blocked by safety gates until task validation and truth-grounding evidence pass. The next product hardening step is adding explicit user accept/reject feedback before any trace is eligible for training.
 
 ## OmniGEPA research notes
 
@@ -168,7 +168,8 @@ This goal is not complete when the code merely runs once. Success means:
 - Add per-task context manifests so file content is captured intentionally, not accidentally.
 - Store Codex JSONL event streams in a compact normalized form.
 - Add an OmniGEPA adapter that optimizes flywheel configuration and training-example filters.
-- Add a promotion gate so only accepted traces move from `pending` to training.
+- Add explicit user accept/reject/edit feedback so only accepted traces move from `pending` to training.
+- Repair the seed task bank so it passes `scripts/validate_task_bank.py`.
 - Evaluate post-training deltas on held-out real-use traces, not only synthetic tasks.
 
 ## References

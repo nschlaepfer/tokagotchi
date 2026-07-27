@@ -319,6 +319,11 @@ class OpusClient:
             test_commands=data.get("test_commands", []),
             expected_output=data.get("expected_output"),
             difficulty=data.get("difficulty", 0.5),
+            metadata={
+                "source": self.provider,
+                "teacher_generated": True,
+                "oracle_trusted": False,
+            },
         )
 
     async def rate_trajectory(self, trajectory: Trajectory) -> list[dict[str, Any]]:

@@ -18,6 +18,7 @@ from src.arena.tools import bash_tool, python_tool, file_tool, submit_tool
 from src.arena.tools.common import ToolResult
 from src.arena.tools.sql_tool import execute as sql_execute
 from src.arena.tools.api_tool import execute as api_execute
+from src.evaluation.task_judge import TaskJudge, TaskJudgeResult
 from src.models import ActionType, StepRecord, TaskSpec, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -281,11 +282,27 @@ class AgentArenaGame:
         return Trajectory(
             task=self._task,
             steps=list(self._steps),
-            success=self._done and any(
-                s.metadata.get("episode_complete") for s in self._steps
-            ),
+            success=False,
             total_reward=total_reward,
             wall_time_seconds=wall_time,
+        )
+
+    async def judge_current(
+        self,
+        trajectory: Trajectory | None = None,
+        *,
+        judge: TaskJudge | None = None,
+    ) -> TaskJudgeResult:
+        """Judge the current live arena state with the canonical TaskJudge."""
+
+        if self._task is None or self._container_id is None:
+            raise RuntimeError("Cannot judge without an active arena episode.")
+        trajectory = trajectory or self.get_trajectory()
+        return await (judge or TaskJudge()).judge(
+            trajectory,
+            self._task,
+            arena_manager=self._docker_mgr,
+            container_id=self._container_id,
         )
 
     async def close(self) -> None:

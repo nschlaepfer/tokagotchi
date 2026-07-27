@@ -95,9 +95,12 @@ def test_00_imports():
     import src.loop3_rl.dapo_clipping
     import src.loop3_rl.tree_grpo
     import src.curriculum.sec_engine
+    import src.evaluation.task_bank_validator
+    import src.evaluation.task_judge
     import src.infra.ollama_utils
     import src.orchestrator.budget_tracker
     import src.orchestrator.opus_client
+    import src.orchestrator.safety_gates
     import src.usage_flywheel
     import src.usage_flywheel.codex_harness
     import src.usage_flywheel.flywheel
@@ -794,9 +797,11 @@ def test_14_pending_buffer():
         assert stats["size"] == 6
         assert stats["is_ready"]
 
-        # Drain
-        batch = buf.get_training_batch()
+        # Transactional peek, then clear after a confirmed handoff
+        batch = buf.peek_training_batch()
         assert len(batch) == 6
+        assert buf.size() == 6
+        buf.clear()
         assert buf.size() == 0
         assert not buf.is_ready()
 
@@ -811,7 +816,7 @@ def test_14_pending_buffer():
     finally:
         Path(persist_path).unlink(missing_ok=True)
 
-    return f"Pending buffer: added 6, drained {len(batch)}, persistence OK"
+    return f"Pending buffer: added 6, peeked+cleared {len(batch)}, persistence OK"
 
 
 # ===================================================================
@@ -984,6 +989,519 @@ def test_18_codex_harness_command():
 
 
 # ===================================================================
+# Test 19: Arena fail-closed behavior
+# ===================================================================
+
+def test_19_arena_fail_closed():
+    """Docker auto-detect must not silently fall back to host subprocess."""
+    import src.arena.docker_manager as dm
+    from src.arena.subprocess_manager import SubprocessManager
+
+    original_docker = dm.docker
+    dm.docker = None
+    try:
+        try:
+            dm.create_arena_manager(use_docker=None)
+            raise AssertionError("Expected fail-closed Docker auto-detect")
+        except dm.ArenaUnavailableError:
+            pass
+
+        try:
+            dm.create_arena_manager(use_docker=False)
+            raise AssertionError("Expected unsafe subprocess opt-in failure")
+        except dm.UnsafeArenaBackendError:
+            pass
+
+        mgr = dm.create_arena_manager(
+            use_docker=False,
+            allow_unsafe_host_execution=True,
+        )
+        assert isinstance(mgr, SubprocessManager)
+        assert mgr.inherit_environment is False
+    finally:
+        dm.docker = original_docker
+
+    return "Arena factory fails closed and unsafe host backend requires explicit opt-in"
+
+
+# ===================================================================
+# Test 20: Host subprocess containment
+# ===================================================================
+
+def test_20_subprocess_containment():
+    """Unsafe host backend must still reject path traversal and secret env inheritance."""
+    import asyncio
+    import os
+    import time
+    from src.arena.subprocess_manager import SubprocessManager
+    from src.arena.tools.file_tool import read_file
+    from src.models import TaskSpec
+
+    async def _run():
+        os.environ["TOKAGOTCHI_TEST_SECRET_SHOULD_NOT_LEAK"] = "leak-me"
+        mgr = SubprocessManager(inherit_environment=False)
+        cid = await mgr.async_create_container(TaskSpec(initial_files={"ok.txt": "OK"}))
+        try:
+            stdout, _, code = await mgr.async_exec_in_container(
+                cid,
+                "python3 - <<'PY'\nimport os\nprint(os.getenv('TOKAGOTCHI_TEST_SECRET_SHOULD_NOT_LEAK', ''))\nPY",
+                timeout=5,
+            )
+            assert code == 0
+            assert "leak-me" not in stdout
+
+            try:
+                await mgr.async_copy_files_to_container(cid, {"../escape.txt": "bad"})
+                raise AssertionError("Expected copy path traversal rejection")
+            except ValueError:
+                pass
+
+            result = await read_file(mgr, cid, "../../etc/passwd")
+            assert result.exit_code == 1
+            assert "escapes" in result.stderr
+
+            started = time.monotonic()
+            try:
+                await mgr.async_exec_in_container(cid, "sleep 5", timeout=1)
+                raise AssertionError("Expected timeout")
+            except TimeoutError:
+                elapsed = time.monotonic() - started
+                assert elapsed < 3.0, f"Timeout did not terminate promptly: {elapsed:.2f}s"
+        finally:
+            await mgr.async_destroy_container(cid)
+            os.environ.pop("TOKAGOTCHI_TEST_SECRET_SHOULD_NOT_LEAK", None)
+
+    asyncio.run(_run())
+    return "Subprocess backend strips secret env, rejects traversal, and kills timeouts"
+
+
+# ===================================================================
+# Test 21: Canonical TaskJudge proof
+# ===================================================================
+
+def test_21_task_judge_oracle():
+    """Submit-only code task fails; reference patch passes through the same judge."""
+    import asyncio
+    from src.arena.subprocess_manager import SubprocessManager
+    from src.evaluation.task_judge import TaskJudge
+    from src.models import ActionType, StepRecord, TaskSpec, TaskType, Trajectory
+
+    async def _run():
+        task = TaskSpec(
+            task_id="judge-proof",
+            task_type=TaskType.CODE_DEBUGGING,
+            description="Write OK to answer.txt",
+            initial_files={"answer.txt": "NO\n"},
+            test_commands=["grep -qx OK answer.txt"],
+        )
+        judge = TaskJudge(command_timeout_seconds=5)
+        mgr = SubprocessManager(inherit_environment=False)
+
+        cid = await mgr.async_create_container(task)
+        try:
+            submit_only = Trajectory(
+                task=task,
+                steps=[
+                    StepRecord(
+                        step_idx=0,
+                        action_type=ActionType.SUBMIT,
+                        action_content="done",
+                        observation="",
+                    )
+                ],
+            )
+            failed = await judge.judge(submit_only, task, arena_manager=mgr, container_id=cid)
+            assert failed.submitted is True
+            assert failed.oracle_passed is False
+            assert failed.success is False
+        finally:
+            await mgr.async_destroy_container(cid)
+
+        cid = await mgr.async_create_container(task)
+        try:
+            await mgr.async_copy_files_to_container(cid, {"answer.txt": "OK\n"})
+            reference = Trajectory(
+                task=task,
+                steps=[
+                    StepRecord(
+                        step_idx=0,
+                        action_type=ActionType.SUBMIT,
+                        action_content="done",
+                        observation="",
+                    )
+                ],
+            )
+            passed = await judge.judge(reference, task, arena_manager=mgr, container_id=cid)
+            assert passed.oracle_passed is True
+            assert passed.success is True
+            assert reference.success is True
+        finally:
+            await mgr.async_destroy_container(cid)
+
+        opt_task = TaskSpec(
+            task_id="benchmark-proof",
+            task_type=TaskType.OPEN_ENDED,
+            description="Return OK quickly enough",
+            initial_files={
+                "solver.py": "import time\n\ndef work():\n    time.sleep(0.6)\n    return 'OK'\n",
+                "test_solver.py": "from solver import work\n\ndef test_work():\n    assert work() == 'OK'\n",
+            },
+            test_commands=["python -m pytest test_solver.py -q"],
+            metadata={
+                "benchmark_command": "python - <<'PY'\nfrom solver import work\nwork()\nPY",
+                "baseline_seconds": 0.4,
+            },
+        )
+        cid = await mgr.async_create_container(opt_task)
+        try:
+            slow = Trajectory(
+                task=opt_task,
+                steps=[
+                    StepRecord(
+                        step_idx=0,
+                        action_type=ActionType.SUBMIT,
+                        action_content="done",
+                        observation="",
+                    )
+                ],
+            )
+            slow_result = await judge.judge(slow, opt_task, arena_manager=mgr, container_id=cid)
+            assert slow_result.oracle_passed is False
+            assert slow_result.success is False
+            assert slow_result.failure_reason == "benchmark_slower_than_baseline"
+            assert slow_result.details["benchmark_seconds"] > slow_result.details["baseline_seconds"]
+        finally:
+            await mgr.async_destroy_container(cid)
+
+        cid = await mgr.async_create_container(opt_task)
+        try:
+            await mgr.async_copy_files_to_container(
+                cid,
+                {"solver.py": "def work():\n    return 'OK'\n"},
+            )
+            fast = Trajectory(
+                task=opt_task,
+                steps=[
+                    StepRecord(
+                        step_idx=0,
+                        action_type=ActionType.SUBMIT,
+                        action_content="done",
+                        observation="",
+                    )
+                ],
+            )
+            fast_result = await judge.judge(fast, opt_task, arena_manager=mgr, container_id=cid)
+            assert fast_result.oracle_passed is True
+            assert fast_result.success is True
+            assert fast_result.details["benchmark_passed"] is True
+            assert fast_result.reward_components["benchmark"] > 0
+        finally:
+            await mgr.async_destroy_container(cid)
+
+    asyncio.run(_run())
+    return "TaskJudge: submit-only fails, reference patch passes, open-ended benchmark gate enforced"
+
+
+# ===================================================================
+# Test 22: Task-bank validator proof
+# ===================================================================
+
+def test_22_task_bank_validator():
+    """Validator detects missing references and proves starter/reference lifecycle."""
+    import asyncio
+    from src.arena.subprocess_manager import SubprocessManager
+    from scripts.validate_task_bank import _summarize
+    from src.evaluation.task_bank_validator import TaskBankValidator
+    from src.models import TaskSpec, TaskType
+
+    async def _run():
+        validator = TaskBankValidator()
+        missing_ref = TaskSpec(
+            task_id="missing-ref",
+            task_type=TaskType.CODE_DEBUGGING,
+            description="Fix answer",
+            initial_files={"answer.txt": "NO\n"},
+            test_commands=["grep -qx OK answer.txt"],
+        )
+        static = validator.validate_static(missing_ref)
+        assert not static.valid
+        assert "executable_task_missing_reference_files" in static.issues
+
+        valid_task = TaskSpec(
+            task_id="valid-ref",
+            task_type=TaskType.CODE_DEBUGGING,
+            description="Fix answer",
+            initial_files={"answer.txt": "NO\n"},
+            test_commands=["grep -qx OK answer.txt"],
+            metadata={"reference_files": {"answer.txt": "OK\n"}},
+        )
+        mgr = SubprocessManager(inherit_environment=False)
+        executable = await validator.validate_executable(valid_task, mgr)
+        assert executable.valid, executable.issues
+        assert executable.starter_result["oracle_passed"] is False
+        assert executable.reference_result["success"] is True
+
+        summary = _summarize(
+            {
+                "task_bank": "inline",
+                "tasks": 1,
+                "valid": True,
+                "results": [executable.to_dict()],
+            }
+        )
+        assert summary["executable_tasks"] == 1
+        assert summary["starters_failed"] == 1
+        assert summary["references_passed"] == 1
+        assert summary["benchmarks_passed"] == 0
+
+    asyncio.run(_run())
+    return "Task-bank validator detects missing reference and proves starter/reference lifecycle"
+
+
+# ===================================================================
+# Test 23: Autonomous safety gates
+# ===================================================================
+
+def test_23_autonomous_safety_gates():
+    """Autonomous SFT/RL/promotion require flags plus complete evidence."""
+    import tempfile
+
+    from src.config import load_config
+    from src.orchestrator.safety_gates import (
+        SafetyGateError,
+        load_gate_evidence,
+        require_autonomous_rl_enabled,
+        require_autonomous_sft_enabled,
+        require_checkpoint_promotion_enabled,
+        validate_gate_evidence,
+    )
+
+    cfg = load_config(PROJECT_ROOT / "config")
+    for gate in (
+        require_autonomous_sft_enabled,
+        require_autonomous_rl_enabled,
+        require_checkpoint_promotion_enabled,
+    ):
+        try:
+            gate(cfg)
+            raise AssertionError(f"Expected {gate.__name__} to block")
+        except SafetyGateError:
+            pass
+
+    with tempfile.TemporaryDirectory(prefix="tokagotchi-gate-") as tmp:
+        evidence_path = Path(tmp) / "truth_gate.json"
+        cfg.safety.gate_evidence_path = str(evidence_path)
+        cfg.safety.enable_autonomous_sft = True
+        cfg.safety.enable_autonomous_rl = True
+        cfg.safety.enable_checkpoint_promotion = True
+
+        evidence_path.write_text(
+            json.dumps({"truth_grounding_passed": True}) + "\n",
+            encoding="utf-8",
+        )
+        weak_issues = validate_gate_evidence(load_gate_evidence(evidence_path))
+        assert "schema_version_must_be_1" in weak_issues
+        assert "missing_arena_evidence" in weak_issues
+        assert "missing_reproducible_commands" in weak_issues
+        for gate in (
+            require_autonomous_sft_enabled,
+            require_autonomous_rl_enabled,
+            require_checkpoint_promotion_enabled,
+        ):
+            try:
+                gate(cfg)
+                raise AssertionError(f"Expected weak evidence to block {gate.__name__}")
+            except SafetyGateError:
+                pass
+
+        host_evidence = _truth_gate_evidence(arena_backend="subprocess")
+        evidence_path.write_text(json.dumps(host_evidence) + "\n", encoding="utf-8")
+        host_issues = validate_gate_evidence(load_gate_evidence(evidence_path))
+        assert "docker_arena_validation_required" in host_issues
+        assert "unsafe_host_execution_not_allowed_for_gate" in host_issues
+        try:
+            require_autonomous_sft_enabled(cfg)
+            raise AssertionError("Expected unsafe-host evidence to block SFT")
+        except SafetyGateError:
+            pass
+
+        missing_counts = _truth_gate_evidence(arena_backend="docker")
+        del missing_counts["task_bank"]["starters_failed"]
+        evidence_path.write_text(json.dumps(missing_counts) + "\n", encoding="utf-8")
+        count_issues = validate_gate_evidence(load_gate_evidence(evidence_path))
+        assert "starter_failure_count_missing" in count_issues
+
+        docker_evidence = _truth_gate_evidence(arena_backend="docker")
+        evidence_path.write_text(json.dumps(docker_evidence) + "\n", encoding="utf-8")
+        assert validate_gate_evidence(load_gate_evidence(evidence_path)) == []
+        for gate in (
+            require_autonomous_sft_enabled,
+            require_autonomous_rl_enabled,
+            require_checkpoint_promotion_enabled,
+        ):
+            gate(cfg)
+
+    return (
+        "Autonomous SFT, RL, and checkpoint promotion require flags plus "
+        "complete Docker-backed truth-gate evidence"
+    )
+
+
+def _truth_gate_evidence(*, arena_backend: str) -> dict[str, Any]:
+    """Build complete test evidence for safety-gate regression tests."""
+
+    return {
+        "schema_version": 1,
+        "truth_grounding_passed": True,
+        "human_reviewed": True,
+        "git_commit": "test-commit",
+        "task_judge_canonical": True,
+        "arena": {
+            "backend": arena_backend,
+            "network": "none",
+            "fail_closed_checked": True,
+            "unsafe_host_execution": arena_backend != "docker",
+        },
+        "task_bank": {
+            "path": "data/curriculum/seed_tasks.json",
+            "static_valid": True,
+            "executable_valid": True,
+            "tasks": 20,
+            "executable_tasks": 20,
+            "starters_failed": 20,
+            "references_passed": 20,
+            "benchmark_tasks": 5,
+            "benchmarks_passed": 5,
+            "invalid_task_ids": [],
+        },
+        "tests": {
+            "suite": "scripts/test_all_loops.py",
+            "total": 26,
+            "passed": 25,
+            "failures": 0,
+            "skipped": 1,
+        },
+        "reproducible_commands": [
+            {
+                "command": "python3 -m compileall -q src scripts",
+                "exit_code": 0,
+            },
+            {
+                "command": "git diff --check",
+                "exit_code": 0,
+            },
+            {
+                "command": (
+                    "python3 scripts/validate_task_bank.py "
+                    "data/curriculum/seed_tasks.json --static-only --summary"
+                ),
+                "exit_code": 0,
+            },
+            {
+                "command": (
+                    "python3 scripts/validate_task_bank.py "
+                    "data/curriculum/seed_tasks.json --summary"
+                ),
+                "exit_code": 0,
+            },
+            {
+                "command": "/tmp/tokagotchi-venv/bin/python scripts/test_all_loops.py",
+                "exit_code": 0,
+            },
+        ],
+    }
+
+
+# ===================================================================
+# Test 24: Teacher-generated oracle gate
+# ===================================================================
+
+def test_24_teacher_generated_oracle_gate():
+    """Teacher-generated task oracles must not enter the active bank by default."""
+    import tempfile
+
+    from src.curriculum.sec_engine import SECEngine
+
+    with tempfile.TemporaryDirectory(prefix="tokagotchi-sec-") as tmp:
+        engine = SECEngine(Path(tmp) / "task_bank.json")
+        generated = {
+            "task_id": "teacher-oracle",
+            "task_type": "info_gathering",
+            "description": "Answer the local file question.",
+            "initial_files": {"answer.txt": "42\n"},
+            "expected_output": "42",
+            "difficulty": 0.4,
+        }
+
+        blocked = engine.add_external_tasks(
+            [generated],
+            source="codex",
+            allow_teacher_generated_tests=False,
+        )
+        assert blocked == 0
+        assert engine.task_count == 0
+
+        allowed = engine.add_external_tasks(
+            [generated],
+            source="codex",
+            allow_teacher_generated_tests=True,
+        )
+        assert allowed == 1
+        task = engine.get_task("teacher-oracle")
+        assert task is not None
+        assert task.metadata["teacher_generated"] is True
+        assert task.metadata["oracle_trusted"] is True
+        assert task.metadata["static_validation"]["valid"] is True
+
+    return "Teacher-generated oracles are blocked unless explicitly trusted"
+
+
+# ===================================================================
+# Test 25: Strict benchmark loading
+# ===================================================================
+
+def test_25_strict_benchmark_loading():
+    """EvalHarness can filter invalid benchmark tasks before optimization."""
+    import tempfile
+
+    from src.infra.eval_harness import EvalHarness
+
+    with tempfile.TemporaryDirectory(prefix="tokagotchi-bench-") as tmp:
+        path = Path(tmp) / "tasks.json"
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "task_id": "invalid-answer",
+                        "task_type": "info_gathering",
+                        "description": "Missing expected output.",
+                        "difficulty": 0.5,
+                    },
+                    {
+                        "task_id": "valid-answer",
+                        "task_type": "info_gathering",
+                        "description": "Answer exactly 42.",
+                        "expected_output": "42",
+                        "difficulty": 0.5,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        harness = EvalHarness()
+        loose = harness.load_benchmark_tasks(str(path), require_valid=False)
+        strict = harness.load_benchmark_tasks(str(path), require_valid=True)
+
+        assert len(loose) == 2
+        assert loose[0].metadata["static_validation"]["valid"] is False
+        assert len(strict) == 1
+        assert strict[0].task_id == "valid-answer"
+
+    return "Strict benchmark loading filters invalid task specs"
+
+
+# ===================================================================
 # Main
 # ===================================================================
 
@@ -1015,6 +1533,13 @@ def main():
         ("Test 16: Usage flywheel store", test_16_usage_flywheel_store),
         ("Test 17: Usage flywheel dry run", test_17_usage_flywheel_dry_run),
         ("Test 18: Codex harness command", test_18_codex_harness_command),
+        ("Test 19: Arena fail-closed", test_19_arena_fail_closed),
+        ("Test 20: Subprocess containment", test_20_subprocess_containment),
+        ("Test 21: TaskJudge oracle", test_21_task_judge_oracle),
+        ("Test 22: Task-bank validator", test_22_task_bank_validator),
+        ("Test 23: Autonomous safety gates", test_23_autonomous_safety_gates),
+        ("Test 24: Teacher-generated oracle gate", test_24_teacher_generated_oracle_gate),
+        ("Test 25: Strict benchmark loading", test_25_strict_benchmark_loading),
     ]
 
     for name, func in tests:

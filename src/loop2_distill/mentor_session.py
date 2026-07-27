@@ -164,6 +164,7 @@ class MentorSession:
                     break
 
             trajectory = game.get_trajectory()
+            await game.judge_current(trajectory)
             trajectory.model_id = vllm_server.config.name
             trajectory.prompt_genome_id = genome.genome_id
 

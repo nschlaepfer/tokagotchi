@@ -34,6 +34,11 @@ from src.loop2_distill import PendingBuffer, SFTLauncher, TraceCollector, TraceS
 from src.models import PromptGenome
 from src.orchestrator.budget_tracker import BudgetTracker
 from src.orchestrator.opus_client import OpusClient
+from src.orchestrator.safety_gates import (
+    SafetyGateError,
+    require_autonomous_sft_enabled,
+    require_checkpoint_promotion_enabled,
+)
 
 logger = logging.getLogger("run_loop2")
 
@@ -65,7 +70,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sandbox", type=str, default="auto",
         choices=["docker", "subprocess", "auto"],
-        help="Arena sandbox backend: docker, subprocess, or auto-detect",
+        help="Arena sandbox backend. subprocess requires --unsafe-host-code-execution.",
+    )
+    parser.add_argument(
+        "--unsafe-host-code-execution",
+        action="store_true",
+        help="Allow explicit host subprocess arena execution. Unsafe; local tests only.",
     )
     parser.add_argument(
         "--log-level", type=str, default="INFO",
@@ -88,13 +98,16 @@ async def main(args: argparse.Namespace) -> None:
     vllm_server = VLLMServer(cfg.model)
     vram_scheduler = VRAMScheduler(vllm_server)
 
-    # Arena sandbox: auto-detect Docker, fall back to subprocess
+    # Arena sandbox: fail closed unless unsafe host execution is explicit.
     use_docker = None  # auto-detect
     if args.sandbox == "docker":
         use_docker = True
     elif args.sandbox == "subprocess":
         use_docker = False
-    arena_manager = create_arena_manager(use_docker=use_docker)
+    arena_manager = create_arena_manager(
+        use_docker=use_docker,
+        allow_unsafe_host_execution=args.unsafe_host_code_execution,
+    )
     logger.info("Arena backend: %s", type(arena_manager).__name__)
 
     trace_collector = TraceCollector()
@@ -152,62 +165,91 @@ async def main(args: argparse.Namespace) -> None:
                 if not traj.success:
                     analysis = await opus_client.correct_trace(traj)
                     if analysis.corrected_steps:
-                        pending_buffer.add(trajectory=traj, analysis=analysis)
-                        n_corrected += 1
+                        example = trace_surgeon.generate_training_example(traj, analysis)
+                        if example:
+                            pending_buffer.add(
+                                example=example,
+                                metadata={
+                                    "task_type": traj.task.task_type.value if traj.task else "unknown",
+                                    "failure_mode": "teacher_corrected",
+                                    "source": cfg.opus.provider,
+                                    "difficulty": traj.task.difficulty if traj.task else 0.5,
+                                },
+                            )
+                            n_corrected += 1
 
             logger.info(
                 "Round %d: %d trajectories, %d failures corrected, buffer=%d",
                 round_idx + 1,
                 len(trajectories),
                 n_corrected,
-                pending_buffer.size,
+                pending_buffer.size(),
             )
 
             # Check if buffer is ready
             if pending_buffer.is_ready():
-                logger.info("Buffer is ready for training (%d examples)", pending_buffer.size)
+                logger.info("Buffer is ready for training (%d examples)", pending_buffer.size())
                 break
 
         # --- Phase 2: SFT Training ---
         should_train = pending_buffer.is_ready() or args.force_train
-        if should_train and pending_buffer.size > 0:
-            logger.info("Starting SFT training with %d examples", pending_buffer.size)
-            training_data = pending_buffer.drain()
-
-            # Switch to training phase (stop Ollama serving, free VRAM)
-            await vram_scheduler.enter_training_phase()
-
+        if should_train and pending_buffer.size() > 0:
             try:
-                # Use HF model path for training (not the Ollama tag)
-                hf_model = str(Path(cfg.model.hf_model_path).resolve())
-                if not Path(hf_model).exists():
-                    # Fall back: try relative to project root
-                    hf_model = str(_project_root / cfg.model.hf_model_path)
-                logger.info("SFT base model: %s", hf_model)
-                checkpoint = await sft_launcher.launch_training(
-                    training_data=training_data,
-                    config=cfg.loop2,
-                    base_model_path=hf_model,
-                )
-                deployment_ts = time.strftime("%Y%m%d_%H%M%S")
-                merged_path = str(data_dir / "checkpoints" / f"merged_{deployment_ts}")
-                deployed_tag = await sft_launcher.deploy_adapter(
-                    base_model_path=hf_model,
-                    adapter_path=checkpoint,
-                    tag=f"tokagotchi-loop2:{deployment_ts}",
-                    merged_output_path=merged_path,
-                )
-                cfg.model.name = deployed_tag
-                vllm_server.config.name = deployed_tag
-                print(
-                    f"\nSFT training complete. Checkpoint: {checkpoint}\n"
-                    f"Deployed merged model to Ollama tag: {deployed_tag}"
-                )
-            finally:
-                # Return to serving phase
-                await vram_scheduler.enter_serving_phase()
+                require_autonomous_sft_enabled(cfg)
+            except SafetyGateError as exc:
+                logger.error("SFT training blocked by safety gate: %s", exc)
+                print(f"\nSFT training blocked by safety gate: {exc}")
+                should_train = False
+            else:
+                logger.info("Starting SFT training with %d examples", pending_buffer.size())
+                training_data = pending_buffer.peek_training_batch()
+
+                # Switch to training phase (stop Ollama serving, free VRAM)
+                await vram_scheduler.enter_training_phase()
+
+                try:
+                    # Use HF model path for training (not the Ollama tag)
+                    hf_model = str(Path(cfg.model.hf_model_path).resolve())
+                    if not Path(hf_model).exists():
+                        # Fall back: try relative to project root
+                        hf_model = str(_project_root / cfg.model.hf_model_path)
+                    logger.info("SFT base model: %s", hf_model)
+                    checkpoint = await sft_launcher.launch_training(
+                        training_data=training_data,
+                        config=cfg.loop2,
+                        base_model_path=hf_model,
+                    )
+                    deployment_ts = time.strftime("%Y%m%d_%H%M%S")
+                    merged_path = str(data_dir / "checkpoints" / f"merged_{deployment_ts}")
+                    try:
+                        require_checkpoint_promotion_enabled(cfg)
+                    except SafetyGateError as exc:
+                        logger.error("Checkpoint promotion blocked by safety gate: %s", exc)
+                        print(
+                            f"\nSFT training complete. Checkpoint: {checkpoint}\n"
+                            f"Checkpoint promotion blocked by safety gate: {exc}\n"
+                            "Pending buffer retained for retry/review."
+                        )
+                    else:
+                        deployed_tag = await sft_launcher.deploy_adapter(
+                            base_model_path=hf_model,
+                            adapter_path=checkpoint,
+                            tag=f"tokagotchi-loop2:{deployment_ts}",
+                            merged_output_path=merged_path,
+                        )
+                        cfg.model.name = deployed_tag
+                        vllm_server.config.name = deployed_tag
+                        print(
+                            f"\nSFT training complete. Checkpoint: {checkpoint}\n"
+                            f"Deployed merged model to Ollama tag: {deployed_tag}"
+                        )
+                        pending_buffer.clear()
+                        pending_buffer.save()
+                finally:
+                    # Return to serving phase
+                    await vram_scheduler.enter_serving_phase()
         else:
-            print(f"\nBuffer not ready for training (size={pending_buffer.size})")
+            print(f"\nBuffer not ready for training (size={pending_buffer.size()})")
 
         # Print summary
         budget = budget_tracker.get_summary()
@@ -215,7 +257,7 @@ async def main(args: argparse.Namespace) -> None:
         print("Loop 2 (Distillation) — Summary")
         print("=" * 60)
         print(f"  Collection rounds:  {args.collect_rounds}")
-        print(f"  Buffer size:        {pending_buffer.size}")
+        print(f"  Buffer size:        {pending_buffer.size()}")
         print(f"  Training triggered: {should_train}")
         print(f"  Teacher spend:      ${budget['total_usd']:.2f}")
         print(f"  API calls:          {budget['num_calls']}")

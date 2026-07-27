@@ -10,6 +10,7 @@ enabling GEPA to understand *why* the agent failed (not just that it did).
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -76,7 +77,14 @@ def arena_metric(
     """
     global _arena_manager
     if _arena_manager is None:
-        _arena_manager = SubprocessManager()
+        if os.environ.get("TOKAGOTCHI_UNSAFE_HOST_CODE_EXECUTION") != "1":
+            logger.error(
+                "DSPy metric requires arena execution but unsafe host subprocess "
+                "execution is disabled. Set TOKAGOTCHI_UNSAFE_HOST_CODE_EXECUTION=1 "
+                "only for explicit local experiments."
+            )
+            return 0.0
+        _arena_manager = SubprocessManager(inherit_environment=False)
 
     task_desc = gold.get("task_description", "")
     solution = getattr(pred, "solution", "") or ""

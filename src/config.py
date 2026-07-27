@@ -148,6 +148,18 @@ class ArenaConfig:
 
 
 @dataclass
+class SafetyConfig:
+    """Fail-closed gates for autonomous training and execution."""
+
+    allow_unsafe_host_execution: bool = False
+    enable_autonomous_sft: bool = False
+    enable_autonomous_rl: bool = False
+    enable_checkpoint_promotion: bool = False
+    allow_teacher_generated_tests: bool = False
+    gate_evidence_path: str = "./data/safety/truth_gate.json"
+
+
+@dataclass
 class RewardWeights:
     outcome: float = 0.6
     process: float = 0.3
@@ -198,6 +210,7 @@ class MasterConfig:
     loop2: Loop2Config = field(default_factory=Loop2Config)
     loop3: Loop3Config = field(default_factory=Loop3Config)
     arena: ArenaConfig = field(default_factory=ArenaConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
     reward_weights: RewardWeights = field(default_factory=RewardWeights)
     codex: CodexConfig = field(default_factory=CodexConfig)
     usage_flywheel: UsageFlywheelConfig = field(default_factory=UsageFlywheelConfig)

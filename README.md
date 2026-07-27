@@ -19,6 +19,8 @@ The product loop comes first:
 
 See [docs/PRODUCT_FLYWHEEL.md](docs/PRODUCT_FLYWHEEL.md) for the detailed success criteria and OmniGEPA notes.
 
+Safety status: autonomous SFT, RL, and checkpoint promotion are disabled by default until oracle-backed task validation and reproducible test evidence pass. See [docs/TRUTH_AND_SAFETY_GATES.md](docs/TRUTH_AND_SAFETY_GATES.md).
+
 Three training loops support that product flywheel:
 
 ### Loop 1 — Prompt Evolution (minutes)
@@ -65,7 +67,7 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
     └──────────────────────┬──────────────────────────┘
                            │
     ┌──────────────────────▼──────────────────────────┐
-    │  Agent Arena (subprocess sandboxes)              │
+    │  Agent Arena (Docker fail-closed by default)     │
     │  bash, python, files, SQL, APIs                  │
     │  Self-Evolving Curriculum + 3-tier rewards       │
     └─────────────────────────────────────────────────┘
@@ -78,7 +80,8 @@ Tree-GRPO with shared prefix rollouts for 4x efficiency. DAPO's asymmetric clipp
 - **Action parser**: Robust multi-format parser handles Qwen's output patterns including `<think>` blocks, orphaned `</think>` tags, bracket-style `[action content]`, and reasoning text before actions.
 - **Subscription auth**: Default teacher calls route through `codex exec`, so normal Codex subscription login is used instead of project-level API keys. If you opt into Claude, calls route through `claude -p`.
 - **Product-use traces**: Real-use traces are written locally under `data/usage_traces/`, redacted for common secret patterns, and ignored by Git.
-- **Sandbox backend**: Auto-detects Docker; falls back to subprocess sandboxes with a `python->python3` shim for Windows/Git Bash compatibility.
+- **Sandbox backend**: Arena loops require Docker by default and fail closed if Docker is unavailable. Host subprocess execution is dev-only and requires `--unsafe-host-code-execution`.
+- **Canonical judge**: `TaskJudge` is the single success authority. A `submit` action is not success unless the task oracle passes.
 - **Mutation lineage**: Every genome stores its mutation type, teacher diagnosis, rationale, and creation timestamp. Full mutation history logs to `mutation_log.jsonl`.
 - **Trajectory persistence**: Eval results save full step-by-step data (actions, observations, reasoning, rewards) for replay and analysis.
 - **Weights & Biases**: Real-time tracking of genome evals, SDPO pairs, training loss, budget, and pipeline status at [wandb.ai](https://wandb.ai).
@@ -96,7 +99,8 @@ Verified on 2026-07-27:
 ## Requirements
 
 - **GPU**: NVIDIA RTX 5090 (32GB) or similar
-- **OS**: Windows 11 (Git Bash / MSYS2) — Docker optional
+- **OS**: Windows 11 (Git Bash / MSYS2)
+- **Docker**: Required for default arena loops. Host subprocess mode is available only with an explicit unsafe dev flag.
 - **CLI**: Codex CLI logged into your ChatGPT/Codex subscription. Claude Code CLI is optional and only needed if you switch `opus.provider` to `claude`.
 - **Python**: 3.11+
 - **Model**: Pulled via Ollama (`ollama pull qwen3.6:27b`). The default config caps local student calls at `num_ctx=2048` for 32GB VRAM stability.
@@ -134,7 +138,10 @@ python scripts/run_usage_flywheel.py "Explain why the latest test failed and pro
 # Dry-run trace collection without Ollama or Codex calls
 python scripts/run_usage_flywheel.py "Check flywheel wiring." --dry-run
 
-# Or run just Loop 1 (prompt evolution, cheapest)
+# Validate tasks before optimization
+python scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only
+
+# Or run just Loop 1 (prompt evolution, cheapest; requires Docker by default)
 python scripts/run_loop1.py --iterations 10
 ```
 
@@ -148,7 +155,7 @@ tokagotchi/
 │   ├── loop1_gepa/      # Prompt evolution: genome, mutations, Pareto frontier
 │   ├── loop2_distill/   # SDPO + Unsloth SFT: trace surgery, training, mentor sessions
 │   ├── loop3_rl/        # RL: Tree-GRPO, DAPO clipping, trajectory filtering
-│   ├── arena/           # Subprocess sandboxes + tools (bash, python, SQL, APIs)
+│   ├── arena/           # Docker/explicit-dev sandboxes + tools (bash, python, SQL, APIs)
 │   ├── curriculum/      # Self-Evolving Curriculum, task generation, frontier probing
 │   ├── usage_flywheel/  # Real-use traces, redaction, Codex boost, pending examples
 │   ├── rewards/         # Outcome, process (teacher-judged), efficiency, composite

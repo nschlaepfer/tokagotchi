@@ -10,6 +10,7 @@ import logging
 import re
 from difflib import SequenceMatcher
 
+from src.evaluation.task_judge import TaskJudge
 from src.models import ActionType, TaskSpec, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -50,19 +51,13 @@ async def compute_outcome_reward(
     float
         Reward in [0.0, 1.0] with support for partial credit.
     """
-    task_type = task_spec.task_type.value
-
-    if task_type == "code_debugging":
-        return await _reward_code_debugging(task_spec, container_id, docker_manager)
-    elif task_type == "info_gathering":
-        return _reward_info_gathering(trajectory, task_spec)
-    elif task_type == "api_orchestration":
-        return _reward_api_orchestration(trajectory, task_spec)
-    elif task_type == "open_ended_optimization":
-        return await _reward_open_ended(task_spec, container_id, docker_manager)
-    else:
-        logger.warning("Unknown task type %r; returning 0.0", task_type)
-        return 0.0
+    result = await TaskJudge().judge(
+        trajectory,
+        task_spec,
+        arena_manager=docker_manager,
+        container_id=container_id,
+    )
+    return result.partial_score
 
 
 # ---------------------------------------------------------------------------

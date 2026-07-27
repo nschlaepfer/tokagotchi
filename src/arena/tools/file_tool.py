@@ -5,13 +5,12 @@ All paths are restricted to /workspace inside the container.
 
 from __future__ import annotations
 
-import posixpath
+import shlex
 
 from typing import Any
 
+from src.arena.path_safety import WORKSPACE_ROOT, workspace_relative_path
 from src.arena.tools.common import ToolResult
-
-WORKSPACE_ROOT = "/workspace"
 
 
 def _validate_and_relativize(path: str) -> tuple[str | None, str]:
@@ -24,17 +23,10 @@ def _validate_and_relativize(path: str) -> tuple[str | None, str]:
 
     Returns (error_msg, relative_path). error_msg is None on success.
     """
-    normalized = posixpath.normpath(path)
-    if normalized.startswith(WORKSPACE_ROOT + "/"):
-        return None, posixpath.relpath(normalized, WORKSPACE_ROOT)
-    elif normalized == WORKSPACE_ROOT:
-        return None, "."
-    elif normalized.startswith("/"):
-        # Absolute path outside /workspace — reject
-        return f"Path must be under {WORKSPACE_ROOT}, got: {path}", ""
-    else:
-        # Already relative — allow it
-        return None, normalized
+    try:
+        return None, workspace_relative_path(path)
+    except ValueError as exc:
+        return str(exc), ""
 
 
 async def read_file(
@@ -60,7 +52,7 @@ async def read_file(
         # Use relative path — works in both Docker (/workspace is cwd) and
         # SubprocessManager (temp dir workspace is cwd)
         stdout, stderr, exit_code = await docker_mgr.async_exec_in_container(
-            container_id, f"cat {rel_path}", timeout=10
+            container_id, f"cat -- {shlex.quote(rel_path)}", timeout=10
         )
     except TimeoutError:
         return ToolResult(

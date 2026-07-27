@@ -331,6 +331,12 @@ class TaskGenerator:
             mapped = _DIMENSION_TO_TYPE.get(raw_type, "code_debugging")
             task_type = TaskType(mapped)
 
+        metadata = {
+            **(data.get("metadata", {}) or {}),
+            "source": "teacher_task_generator",
+            "teacher_generated": True,
+            "oracle_trusted": False,
+        }
         return TaskSpec(
             task_id=uuid.uuid4().hex[:12],
             task_type=task_type,
@@ -339,5 +345,5 @@ class TaskGenerator:
             test_commands=data.get("test_commands", []),
             expected_output=data.get("expected_output"),
             difficulty=data.get("difficulty", 0.5),
-            metadata=data.get("metadata", {}),
+            metadata=metadata,
         )

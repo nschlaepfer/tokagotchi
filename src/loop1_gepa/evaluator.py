@@ -18,6 +18,7 @@ from src.arena.docker_manager import DockerManager
 from src.arena.tools import bash_tool, file_tool, python_tool, submit_tool
 from src.arena.tools.common import ToolResult
 from src.config import ArenaConfig, Loop1Config
+from src.evaluation.task_judge import TaskJudge
 from src.infra.vllm_server import VLLMServer
 from src.infra import wandb_tracker
 from src.models import (
@@ -312,9 +313,14 @@ async def _run_agent_loop(
                 break
 
         trajectory.wall_time_seconds = time.monotonic() - start_time
-        trajectory.success = episode_complete and _check_task_success(
-            trajectory, task, docker_mgr, container_id
+        judge_result = await TaskJudge().judge(
+            trajectory,
+            task,
+            arena_manager=docker_mgr,
+            container_id=container_id,
         )
+        trajectory.success = judge_result.success
+        trajectory.total_reward = judge_result.partial_score
 
     finally:
         await docker_mgr.async_release_container(container_id)
@@ -354,10 +360,10 @@ def _check_task_success(
     docker_mgr: DockerManager,
     container_id: str,
 ) -> bool:
-    """Quick synchronous success heuristic.
+    """Deprecated compatibility wrapper.
 
-    Checks if the last step was a submit and whether test commands (if any)
-    would plausibly pass. For a full reward, the reward module is used separately.
+    Success must come from ``TaskJudge``. This helper now only reports whether
+    the episode was submitted and is not used as an oracle.
     """
     if not trajectory.steps:
         return False
@@ -366,9 +372,7 @@ def _check_task_success(
     if last_step.action_type != ActionType.SUBMIT:
         return False
 
-    # If there are test commands defined, we consider the task plausibly successful
-    # if the agent submitted (actual test verification happens in reward computation).
-    return True
+    return False
 
 
 # ---------------------------------------------------------------------------

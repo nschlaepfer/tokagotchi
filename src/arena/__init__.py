@@ -2,13 +2,18 @@
 
 Provides two backends:
   - DockerManager:      production isolation via Docker containers
-  - SubprocessManager:  lightweight isolation via temp-dir + subprocess (dev/CI)
+  - SubprocessManager:  unsafe host subprocess backend for explicit local tests
 
-Use ``create_arena_manager()`` to auto-detect which is available,
-or pass ``--sandbox docker|subprocess`` in CLI scripts.
+Use ``create_arena_manager()`` for fail-closed Docker execution. Host
+subprocess execution requires an explicit unsafe opt-in.
 """
 
-from src.arena.docker_manager import DockerManager, create_arena_manager
+from src.arena.docker_manager import (
+    ArenaUnavailableError,
+    DockerManager,
+    UnsafeArenaBackendError,
+    create_arena_manager,
+)
 from src.arena.subprocess_manager import SubprocessManager
 from src.arena.game import AgentArenaGame
 
@@ -19,7 +24,9 @@ ArenaManager = DockerManager | SubprocessManager
 __all__ = [
     "AgentArenaGame",
     "ArenaManager",
+    "ArenaUnavailableError",
     "DockerManager",
     "SubprocessManager",
+    "UnsafeArenaBackendError",
     "create_arena_manager",
 ]

@@ -64,6 +64,7 @@ class Trajectory:
     wall_time_seconds: float = 0.0
     model_id: str = ""
     prompt_genome_id: str = ""
+    evaluation: dict[str, Any] = field(default_factory=dict)
 
     @property
     def num_steps(self) -> int:

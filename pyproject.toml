@@ -28,6 +28,16 @@ training = [
 serving = [
     "vllm>=0.6",             # LLM serving
 ]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+]
+test = [
+    "pytest>=8.0",
+]
+dspy = [
+    "dspy-ai>=2.6",
+]
 
 [project.scripts]
 qsi-loop1 = "scripts.run_loop1:main"
@@ -35,6 +45,7 @@ qsi-loop2 = "scripts.run_loop2:main"
 qsi-loop3 = "scripts.run_loop3:main"
 qsi-all = "scripts.run_all:main"
 tokagotchi-flywheel = "scripts.run_usage_flywheel:main"
+tokagotchi-validate-tasks = "scripts.validate_task_bank:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

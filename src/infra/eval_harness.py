@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src.evaluation.task_judge import TaskJudge
+from src.evaluation.task_bank_validator import TaskBankValidator
 from src.models import ActionType, EvalResult, PromptGenome, StepRecord, TaskSpec, TaskType, Trajectory
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ class EvalHarness:
         tool_steps = 0
         action_type_counts: dict[str, int] = {}
         failure_patterns: dict[str, int] = {}
+        judge = TaskJudge()
 
         for task in tasks:
             try:
@@ -137,8 +140,9 @@ class EvalHarness:
                         step_idx += 1
 
                     trajectory.wall_time_seconds = time.monotonic() - step_start
-                    trajectory.success = done and step_result.reward > 0
-                    trajectory.total_reward = sum(s.reward for s in trajectory.steps)
+                    judge_result = await game.judge_current(trajectory, judge=judge)
+                    trajectory.success = judge_result.success
+                    trajectory.total_reward = judge_result.partial_score
 
                     if trajectory.success:
                         successes += 1
@@ -250,7 +254,12 @@ class EvalHarness:
     # Benchmark loading
     # ------------------------------------------------------------------
 
-    def load_benchmark_tasks(self, path: str) -> list[TaskSpec]:
+    def load_benchmark_tasks(
+        self,
+        path: str,
+        *,
+        require_valid: bool = False,
+    ) -> list[TaskSpec]:
         """Load benchmark tasks from a JSON file or directory.
 
         Parameters
@@ -258,6 +267,8 @@ class EvalHarness:
         path:
             Path to a JSON file containing a list of task specifications or
             a directory containing one or more JSON/JSONL task files.
+        require_valid:
+            If true, tasks that fail static oracle validation are filtered out.
 
         Returns
         -------
@@ -299,7 +310,44 @@ class EvalHarness:
                     metadata=raw.get("metadata", {}),
                 ))
 
-            logger.info("Loaded %d benchmark tasks from %s", len(tasks), task_path)
+            validator = TaskBankValidator()
+            valid_tasks: list[TaskSpec] = []
+            invalid_count = 0
+            for task in tasks:
+                validation = validator.validate_static(task)
+                task.metadata = {
+                    **task.metadata,
+                    "static_validation": validation.to_dict(),
+                }
+                if validation.valid:
+                    valid_tasks.append(task)
+                    continue
+
+                invalid_count += 1
+                logger.warning(
+                    "Benchmark task %s failed static validation: %s",
+                    task.task_id or "<missing-id>",
+                    ", ".join(validation.issues),
+                )
+
+            if require_valid:
+                logger.info(
+                    "Loaded %d/%d statically valid benchmark tasks from %s",
+                    len(valid_tasks),
+                    len(tasks),
+                    task_path,
+                )
+                return valid_tasks
+
+            if invalid_count:
+                logger.warning(
+                    "Loaded %d benchmark tasks from %s with %d static validation failures",
+                    len(tasks),
+                    task_path,
+                    invalid_count,
+                )
+            else:
+                logger.info("Loaded %d benchmark tasks from %s", len(tasks), task_path)
             return tasks
 
         except (json.JSONDecodeError, OSError) as exc:

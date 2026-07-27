@@ -152,27 +152,42 @@ class PendingBuffer:
         with self._lock:
             return self._diversity_check_unlocked()
 
-    def get_training_batch(self) -> list[dict[str, Any]]:
-        """Return all examples and clear the buffer.
+    def peek_training_batch(self) -> list[dict[str, Any]]:
+        """Return all examples without clearing the buffer.
 
-        This drains the buffer entirely, returning all accumulated
-        examples for training. The buffer is reset afterward.
-
-        Returns
-        -------
-        list[dict]
-            All training examples that were in the buffer.
+        Use this before training so a failed training/deploy attempt does not
+        erase the only copy of the supervision data.
         """
         with self._lock:
-            batch = list(self._examples)
+            return list(self._examples)
+
+    def clear(self) -> None:
+        """Clear all examples and metadata after a confirmed successful handoff."""
+        with self._lock:
+            count = len(self._examples)
             self._examples.clear()
             self._metadata.clear()
             self._task_type_counts.clear()
             self._failure_mode_counts.clear()
             self._difficulty_counts.clear()
 
-            logger.info("Drained buffer: %d examples for training", len(batch))
-            return batch
+            logger.info("Cleared buffer: %d examples", count)
+
+    def get_training_batch(self) -> list[dict[str, Any]]:
+        """Return all examples and clear the buffer.
+
+        This drains the buffer entirely, returning all accumulated
+        examples for training. The buffer is reset afterward. Prefer
+        ``peek_training_batch`` plus ``clear`` for transactional training flows.
+
+        Returns
+        -------
+        list[dict]
+            All training examples that were in the buffer.
+        """
+        batch = self.peek_training_batch()
+        self.clear()
+        return batch
 
     def save(self) -> None:
         """Persist the buffer to disk as JSONL.

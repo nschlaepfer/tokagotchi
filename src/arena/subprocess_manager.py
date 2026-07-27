@@ -12,12 +12,14 @@ import logging
 import os
 import re
 import shutil
+import signal
 import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.arena.path_safety import local_workspace_path
 from src.models import TaskSpec
 
 logger = logging.getLogger(__name__)
@@ -99,8 +101,14 @@ class SubprocessManager:
     (e.g. ``AgentArenaGame``) can use either backend transparently.
     """
 
-    def __init__(self, default_timeout: int = DEFAULT_EXEC_TIMEOUT) -> None:
+    def __init__(
+        self,
+        default_timeout: int = DEFAULT_EXEC_TIMEOUT,
+        *,
+        inherit_environment: bool = False,
+    ) -> None:
         self.default_timeout = default_timeout
+        self.inherit_environment = inherit_environment
         self._sandboxes: dict[str, _SandboxInfo] = {}
 
     # ------------------------------------------------------------------
@@ -175,7 +183,7 @@ class SubprocessManager:
             return ("", f"Unknown sandbox: {container_id}", 1)
 
         try:
-            env = os.environ.copy()
+            env = os.environ.copy() if self.inherit_environment else _minimal_env()
             # Ensure 'python' resolves: add a shim dir to PATH if needed
             _ensure_python_shim()
             if _PYTHON_SHIM_DIR:
@@ -186,6 +194,7 @@ class SubprocessManager:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=info.workspace,
                 env=env,
+                start_new_session=True,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout,
@@ -197,7 +206,14 @@ class SubprocessManager:
         except asyncio.TimeoutError:
             # Kill the runaway process
             try:
-                proc.kill()  # type: ignore[possibly-undefined]
+                os.killpg(proc.pid, signal.SIGKILL)  # type: ignore[possibly-undefined]
+            except Exception:
+                try:
+                    proc.kill()  # type: ignore[possibly-undefined]
+                except Exception:
+                    pass
+            try:
+                await proc.wait()  # type: ignore[possibly-undefined]
             except Exception:
                 pass
             raise TimeoutError(f"Command exceeded {timeout}s timeout") from None
@@ -222,8 +238,8 @@ class SubprocessManager:
             raise ValueError(f"Unknown sandbox: {container_id}")
 
         for rel_path, content in files.items():
-            dest = os.path.join(info.workspace, rel_path)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            dest = local_workspace_path(info.workspace, rel_path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             with open(dest, "w", encoding="utf-8") as fh:
                 fh.write(content)
 
@@ -268,3 +284,12 @@ class SubprocessManager:
 
     async def async_destroy_all(self) -> None:
         await asyncio.to_thread(self.destroy_all)
+
+
+def _minimal_env() -> dict[str, str]:
+    env: dict[str, str] = {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+    }
+    return env

@@ -38,6 +38,12 @@ from src.models import EvalResult, PromptGenome, TaskSpec
 from src.orchestrator.budget_tracker import BudgetTracker
 from src.orchestrator.experiment_git import ExperimentGit
 from src.orchestrator.opus_client import OpusClient
+from src.orchestrator.safety_gates import (
+    SafetyGateError,
+    require_autonomous_rl_enabled,
+    require_autonomous_sft_enabled,
+    require_checkpoint_promotion_enabled,
+)
 from src.rewards import CompositeReward
 from src.infra import wandb_tracker
 
@@ -195,8 +201,11 @@ class MasterLoop:
         # VRAM scheduler
         self.vram_scheduler = VRAMScheduler(self.vllm_server)
 
-        # Arena (auto-detects Docker, falls back to subprocess)
-        self.arena_manager = create_arena_manager()
+        # Arena is fail-closed: Docker is required unless unsafe host execution
+        # is explicitly enabled in config.safety.
+        self.arena_manager = create_arena_manager(
+            allow_unsafe_host_execution=cfg.safety.allow_unsafe_host_execution,
+        )
         logger.info("Arena backend: %s", type(self.arena_manager).__name__)
 
         # Curriculum
@@ -214,7 +223,8 @@ class MasterLoop:
 
         # Loop 1 — GEPA
         seed_tasks = self.eval_harness.load_benchmark_tasks(
-            str(data_dir / "curriculum" / "seed_tasks.json")
+            str(data_dir / "curriculum" / "seed_tasks.json"),
+            require_valid=True,
         )
         _, benchmark_source = self._resolve_benchmark_path()
         if benchmark_source == "seed_holdout_fallback":
@@ -358,11 +368,20 @@ class MasterLoop:
                         logger.info("Loop 2: buffer ready — triggering SFT")
                         self._loop_status["loop2_distill"] = "training"
 
+                        try:
+                            require_autonomous_sft_enabled(self.config)
+                        except SafetyGateError as exc:
+                            logger.error("Loop 2 SFT blocked by safety gate: %s", exc)
+                            self._loop_status["loop2_distill"] = "blocked_by_safety_gate"
+                            await asyncio.sleep(60.0)
+                            continue
+
                         # Codex training data review (non-blocking)
                         await self._codex_review_training_data()
 
-                        # Drain training examples from the buffer
-                        training_data = self._pending_buffer.get_training_batch()
+                        # Read training examples transactionally; clear only
+                        # after successful serving-model promotion.
+                        training_data = self._pending_buffer.peek_training_batch()
 
                         # Transition to training phase (stop Ollama serving)
                         await self.vram_scheduler.enter_training_phase()
@@ -383,7 +402,9 @@ class MasterLoop:
                             self._free_training_vram()
 
                         # Export to Ollama in a SEPARATE subprocess (clean VRAM)
+                        promotion_succeeded = False
                         try:
+                            require_checkpoint_promotion_enabled(self.config)
                             ollama_name = await self._sft_launcher.export_to_ollama(
                                 base_model_path=hf_model,
                                 adapter_path=checkpoint_path,
@@ -395,6 +416,12 @@ class MasterLoop:
                             self.vllm_server.config.name = ollama_name
                             self._metrics["serving_model"] = ollama_name
                             logger.info("Loop 2: Serving updated model %s", ollama_name)
+                            self._pending_buffer.clear()
+                            self._pending_buffer.save()
+                            promotion_succeeded = True
+                        except SafetyGateError as exc:
+                            logger.error("Loop 2: checkpoint promotion blocked by safety gate: %s", exc)
+                            self._loop_status["loop2_distill"] = "blocked_by_safety_gate"
                         except Exception:
                             logger.exception("Loop 2: Export failed — adapter saved at %s", checkpoint_path)
                             # Delegate diagnosis to Codex if available
@@ -405,7 +432,7 @@ class MasterLoop:
                             )
 
                         # Commit results via git
-                        if self.experiment_git:
+                        if self.experiment_git and promotion_succeeded:
                             try:
                                 await self.experiment_git.create_experiment_branch(
                                     "loop2", "sft_training",
@@ -661,6 +688,14 @@ class MasterLoop:
             while not self._shutdown_event.is_set():
                 try:
                     if self._is_overnight_window():
+                        try:
+                            require_autonomous_rl_enabled(self.config)
+                        except SafetyGateError as exc:
+                            logger.error("Loop 3 RL blocked by safety gate: %s", exc)
+                            self._loop_status["loop3_rl"] = "blocked_by_safety_gate"
+                            await asyncio.sleep(600)
+                            continue
+
                         # Wait for Loop 2 to finish if it's training
                         if self._loop_status.get("loop2_distill") == "training":
                             logger.info("Loop 3: waiting for Loop 2 SFT to finish...")
@@ -684,9 +719,17 @@ class MasterLoop:
 
                         # Tag the best checkpoint
                         if self.experiment_git and result.get("improved"):
-                            await self.experiment_git.tag_best(
-                                f"best-rl-{time.strftime('%Y%m%d')}"
-                            )
+                            try:
+                                require_checkpoint_promotion_enabled(self.config)
+                            except SafetyGateError as exc:
+                                logger.error(
+                                    "Loop 3: best-checkpoint tag blocked by safety gate: %s",
+                                    exc,
+                                )
+                            else:
+                                await self.experiment_git.tag_best(
+                                    f"best-rl-{time.strftime('%Y%m%d')}"
+                                )
 
                         self._loop_status["loop3_rl"] = "waiting"
 

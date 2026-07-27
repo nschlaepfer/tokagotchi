@@ -29,6 +29,7 @@ from src.infra.vram_scheduler import VRAMScheduler
 from src.loop3_rl import RLRunner
 from src.orchestrator.budget_tracker import BudgetTracker
 from src.orchestrator.opus_client import OpusClient
+from src.orchestrator.safety_gates import SafetyGateError, require_autonomous_rl_enabled
 
 logger = logging.getLogger("run_loop3")
 
@@ -56,7 +57,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sandbox", type=str, default="auto",
         choices=["docker", "subprocess", "auto"],
-        help="Arena sandbox backend: docker, subprocess, or auto-detect",
+        help="Arena sandbox backend. subprocess requires --unsafe-host-code-execution.",
+    )
+    parser.add_argument(
+        "--unsafe-host-code-execution",
+        action="store_true",
+        help="Allow explicit host subprocess arena execution. Unsafe; local tests only.",
     )
     parser.add_argument(
         "--log-level", type=str, default="INFO",
@@ -72,6 +78,13 @@ async def main(args: argparse.Namespace) -> None:
     if args.epochs is not None:
         cfg.loop3.total_epochs = args.epochs
 
+    try:
+        require_autonomous_rl_enabled(cfg)
+    except SafetyGateError as exc:
+        logger.error("Loop 3 RL blocked by safety gate: %s", exc)
+        print(f"\nLoop 3 RL blocked by safety gate: {exc}")
+        sys.exit(2)
+
     # Initialise subsystems
     budget_tracker = BudgetTracker(
         hourly_limit_usd=cfg.opus.hourly_budget_usd,
@@ -82,13 +95,16 @@ async def main(args: argparse.Namespace) -> None:
     vllm_server = VLLMServer(cfg.model)
     vram_scheduler = VRAMScheduler(vllm_server)
 
-    # Arena sandbox: auto-detect Docker, fall back to subprocess
+    # Arena sandbox: fail closed unless unsafe host execution is explicit.
     use_docker = None
     if args.sandbox == "docker":
         use_docker = True
     elif args.sandbox == "subprocess":
         use_docker = False
-    arena_manager = create_arena_manager(use_docker=use_docker)
+    arena_manager = create_arena_manager(
+        use_docker=use_docker,
+        allow_unsafe_host_execution=args.unsafe_host_code_execution,
+    )
     logger.info("Arena backend: %s", type(arena_manager).__name__)
 
     curriculum = SECEngine(task_bank_path=data_dir / "task_bank.json")

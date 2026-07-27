@@ -1,5 +1,36 @@
 # Known Issues & Workarounds
 
+## Current seed task bank is not a trusted benchmark
+
+**Status**: Repaired and kept behind gates
+**Affected**: Loop 1 GEPA, periodic evaluation, any training/promotion evidence built from `data/curriculum/seed_tasks.json`
+**Date**: July 27, 2026
+
+### Problem
+
+The previous seed task bank did not meet the truth-grounding bar required for autonomous learning. Static validation reported 4/20 valid tasks. The invalid entries were missing expected outputs, executable reference files, or open-ended benchmark metadata.
+
+The repaired seed bank has exact executable oracles and reference artifacts for all 20 tasks. Optimization tasks also require measured benchmark runtime at or below their declared baselines. Static validation and explicit local executable validation pass, but autonomous training/promotion remains gated until a human reviews the full truth-gate evidence.
+
+### Supported Path
+
+Run validation before using any task bank as promotion evidence:
+
+```bash
+python scripts/validate_task_bank.py data/curriculum/seed_tasks.json --static-only
+```
+
+Autonomous SFT, RL, and checkpoint promotion are disabled by default until `data/safety/truth_gate.json` contains reviewed, schema-valid proof and the relevant safety flags are explicitly enabled. A bare `truth_grounding_passed: true` file is rejected; autonomous gates require Docker-backed arena evidence, task-bank starter/reference proof, integration-test proof, and reproducible commands with zero exit codes.
+
+### Files Affected
+
+- `src/evaluation/task_bank_validator.py` — Static and executable task-bank validation
+- `src/evaluation/task_judge.py` — Canonical success authority
+- `src/orchestrator/safety_gates.py` — SFT/RL/promotion gates
+- `docs/TRUTH_AND_SAFETY_GATES.md` — Current proof boundary
+
+---
+
 ## bitsandbytes 4-bit Segfault on Qwen 3.5 / Qwen3.6-family training
 
 **Status**: Mitigated via Unsloth; raw bitsandbytes is disabled by default

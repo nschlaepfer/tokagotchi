@@ -81,3 +81,13 @@ paths:
   curriculum_dir: "./data/curriculum"
   checkpoints_dir: "./data/checkpoints"
   benchmarks_dir: "./eval/benchmarks"
+
+safety:
+  # P0 posture: collect and evaluate only until canonical judge and benchmark
+  # evidence proves autonomous training/promotion is trustworthy.
+  allow_unsafe_host_execution: false
+  enable_autonomous_sft: false
+  enable_autonomous_rl: false
+  enable_checkpoint_promotion: false
+  allow_teacher_generated_tests: false
+  gate_evidence_path: "./data/safety/truth_gate.json"

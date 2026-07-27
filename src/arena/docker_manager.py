@@ -7,6 +7,7 @@ and a pre-warmed container pool for efficient episode throughput.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import io
 import logging
 import tarfile
@@ -24,6 +25,7 @@ except Exception as exc:  # Docker SDK is optional when using subprocess arena.
     Container = Any  # type: ignore[misc,assignment]
     _DOCKER_IMPORT_ERROR = exc
 
+from src.arena.path_safety import workspace_relative_path
 from src.models import TaskSpec
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,14 @@ ARENA_IMAGE = "qwen-arena:latest"
 WORKSPACE_DIR = "/workspace"
 DEFAULT_POOL_SIZE = 4
 DEFAULT_EXEC_TIMEOUT = 30
+
+
+class ArenaUnavailableError(RuntimeError):
+    """Raised when no safe arena backend is available."""
+
+
+class UnsafeArenaBackendError(RuntimeError):
+    """Raised when host execution is requested without explicit unsafe opt-in."""
 
 
 @dataclass
@@ -143,11 +153,16 @@ class DockerManager:
             self.image,
             detach=True,
             stdin_open=True,
-            network_mode="bridge",
-            mem_limit="512m",
-            cpu_period=100_000,
-            cpu_quota=50_000,  # 0.5 CPU
+            network_mode="none",
+            mem_limit="2g",
+            nano_cpus=2_000_000_000,
+            pids_limit=64,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges:true"],
+            read_only=True,
+            tmpfs={WORKSPACE_DIR: "rw,nosuid,nodev,size=512m"},
             working_dir=WORKSPACE_DIR,
+            user="agent",
         )
         return container.id
 
@@ -179,7 +194,12 @@ class DockerManager:
         )
 
         # Use a socket for streaming so we can enforce a timeout
-        output = _run_exec_with_timeout(self.client, exec_handle["Id"], timeout)
+        output = _run_exec_with_timeout(
+            self.client,
+            container_id,
+            exec_handle["Id"],
+            timeout,
+        )
 
         inspect = self.client.api.exec_inspect(exec_handle["Id"])
         exit_code: int = inspect.get("ExitCode", -1)
@@ -234,7 +254,7 @@ class DockerManager:
         try:
             self.exec_in_container(
                 container_id,
-                "rm -rf /workspace/* /workspace/.*  2>/dev/null || true",
+                "find /workspace -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +",
                 timeout=10,
             )
         except Exception:
@@ -291,8 +311,9 @@ def _make_tar(files: dict[str, str]) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
         for name, content in files.items():
+            safe_name = workspace_relative_path(name)
             data = content.encode("utf-8")
-            info = tarfile.TarInfo(name=name)
+            info = tarfile.TarInfo(name=safe_name)
             info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
     buf.seek(0)
@@ -301,26 +322,30 @@ def _make_tar(files: dict[str, str]) -> bytes:
 
 def _run_exec_with_timeout(
     client: docker.DockerClient,
+    container_id: str,
     exec_id: str,
     timeout: int,
 ) -> str:
     """Run a Docker exec and enforce a wall-clock timeout."""
-    import concurrent.futures
-
     def _collect() -> str:
         output = client.api.exec_start(exec_id, stream=False, demux=False)
         if isinstance(output, bytes):
             return output.decode("utf-8", errors="replace")
         return str(output)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_collect)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_collect)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
         try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(
-                f"Command exceeded {timeout}s timeout"
-            ) from None
+            container = client.containers.get(container_id)
+            container.remove(force=True)
+        except Exception:
+            logger.warning("Failed to remove timed-out container %s", container_id[:12], exc_info=True)
+        raise TimeoutError(f"Command exceeded {timeout}s timeout") from None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 # ------------------------------------------------------------------
@@ -328,8 +353,17 @@ def _run_exec_with_timeout(
 # ------------------------------------------------------------------
 
 
-def create_arena_manager(use_docker: bool = None) -> "DockerManager | SubprocessManager":
-    """Create the appropriate arena manager based on Docker availability."""
+def create_arena_manager(
+    use_docker: bool | None = None,
+    *,
+    allow_unsafe_host_execution: bool = False,
+) -> "DockerManager | SubprocessManager":
+    """Create the arena manager.
+
+    Defaults fail closed: Docker unavailable raises instead of silently using
+    host subprocess execution. The subprocess backend is available only behind
+    an explicit unsafe opt-in for local tests/development.
+    """
     if use_docker is None:
         # Auto-detect: ping AND try to list containers (catches credential errors)
         try:
@@ -342,11 +376,18 @@ def create_arena_manager(use_docker: bool = None) -> "DockerManager | Subprocess
             use_docker = True
             logger.info("Docker detected and working")
         except Exception as e:
-            logger.info("Docker not available (%s), using subprocess sandbox", e)
-            use_docker = False
+            raise ArenaUnavailableError(
+                "Docker arena is unavailable and tokagotchi fails closed by default. "
+                "Install/start Docker or pass allow_unsafe_host_execution=True only "
+                "for explicit local test runs."
+            ) from e
 
     if use_docker:
         return DockerManager()
-    else:
-        from src.arena.subprocess_manager import SubprocessManager
-        return SubprocessManager()
+    if not allow_unsafe_host_execution:
+        raise UnsafeArenaBackendError(
+            "Subprocess arena executes model-generated commands on the host. "
+            "Pass allow_unsafe_host_execution=True only for explicit local test runs."
+        )
+    from src.arena.subprocess_manager import SubprocessManager
+    return SubprocessManager(inherit_environment=False)
