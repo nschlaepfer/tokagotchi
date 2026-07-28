@@ -114,6 +114,25 @@ The proof is only acceptable when all of these are true:
 
 The current safety gate also requires `git_dirty: false` in the evidence file.
 
+## Latest verified proof
+
+GitHub Actions passed the Docker proof gate for commit
+`d2a17ce396ae4e00ecc1497d51133dbd3227e029` in run `30316051838`
+on 2026-07-28 UTC.
+
+Machine-readable artifact summary:
+
+- `proof.status: passed`
+- `truth_gate_candidate.truth_grounding_passed: true`
+- `truth_gate_candidate.human_reviewed: false`
+- task bank: 20 tasks, 20 executable tasks, 20 starters failed, 20 references passed, 5/5 benchmarks passed
+- integration suite: 29 total, 26 passed, 0 failed, 3 skipped
+
+The skipped tests were expected in the proof image: local Ollama probing, Codex
+CLI presence, and PyTorch-only DAPO coverage. The proof validates local wiring,
+task oracles, Docker arena behavior, and safety gates; it does not assert that a
+user is logged into Codex or that the local training stack has PyTorch installed.
+
 ## Review before promotion
 
 Before copying or adapting `truth_gate_candidate.json` into `data/safety/truth_gate.json`, inspect:

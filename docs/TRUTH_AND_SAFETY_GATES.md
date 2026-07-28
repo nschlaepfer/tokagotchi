@@ -216,12 +216,16 @@ Results:
 - Current repaired seed task bank: passed executable starter/reference validation with 20/20 executable tasks, 20/20 starters failing, 20/20 references passing, and 5/5 optimization benchmark proofs passing for reference artifacts.
 - Docker proof runner dry-run: passed and emitted the exact command plan.
 - Docker proof runner real run in current WSL: blocked cleanly because Docker daemon integration is unavailable; it wrote a blocked proof artifact under `data/proofs/docker_gate/`.
+- GitHub Actions Docker proof passed for commit `d2a17ce396ae4e00ecc1497d51133dbd3227e029` in run `30316051838` on 2026-07-28 UTC:
+  - `truth_grounding_passed: true`
+  - git tree clean
+  - task bank valid: 20/20 tasks, 20/20 starters failed, 20/20 references passed, 5/5 benchmarks passed
+  - integration suite: 29 total, 26 passed, 0 failed, 3 skipped
 
 That failed seed-bank validation is intentional proof that the validator catches weak benchmark entries. The repaired seed bank must pass both static validation and executable starter/reference validation before it can become trusted benchmark evidence.
 
 ## Remaining risks
 
-- Docker-backed executable validation still needs to be run on a machine with the arena image and daemon available.
-- Docker runtime hardening should be exercised on a machine with the arena image and daemon available; current tests prove fail-closed behavior and host-subprocess containment.
+- The generated `truth_gate_candidate.json` still needs human review before it can become local gate evidence.
 - Loop 3 RL math/checkpoint quality is not scientifically revalidated; it is gated off.
 - Product-use trace feedback controls are currently CLI-based; a richer UI can come later, but pending-buffer promotion is now gated by explicit acceptance.

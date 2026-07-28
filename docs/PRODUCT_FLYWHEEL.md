@@ -232,7 +232,9 @@ This goal is not complete when the code merely runs once. Success means:
 - The integration suite now includes feedback/promotion controls; rerun `scripts/test_all_loops.py` after changing this flow.
 - `scripts/test_all_loops.py --json-out /tmp/tokagotchi-local-tests.json` passed in a dependency-complete venv with 29 total, 28 pass, 1 skip, and 0 fail.
 - `scripts/prove_docker_gate.py --dry-run` passed and emitted the Docker command plan.
-- `scripts/prove_docker_gate.py` blocked cleanly in the current WSL environment because Docker daemon integration is unavailable. Docker-backed proof remains required before autonomous training/promotion is unlocked.
+- GitHub Actions Docker proof passed for commit `d2a17ce396ae4e00ecc1497d51133dbd3227e029` in run `30316051838` on 2026-07-28 UTC.
+- The proof artifact reported `truth_grounding_passed: true`, a clean git tree, 20/20 executable task references passing, 5/5 optimization benchmarks passing, and 0 integration-test failures.
+- The generated `truth_gate_candidate.json` still requires human review before autonomous training/promotion can be unlocked.
 - Direct flywheel smokes passed for both the local student path (`TOKA_FLYWHEEL_OK`) and the Codex boost path (`TOKA_CODEX_FLYWHEEL_OK`).
 - The Ollama-backed compatibility server passed a start/chat/stop smoke through the WSL gateway (`TOKA_SERVER_OK`).
 
