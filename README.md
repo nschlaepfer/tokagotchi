@@ -22,7 +22,7 @@ See [docs/PRODUCT_FLYWHEEL.md](docs/PRODUCT_FLYWHEEL.md) for the detailed succes
 
 Safety status: autonomous SFT, RL, and checkpoint promotion are disabled by default until oracle-backed task validation and reproducible test evidence pass. See [docs/TRUTH_AND_SAFETY_GATES.md](docs/TRUTH_AND_SAFETY_GATES.md).
 
-Docker proof status: GitHub Actions passed the Docker proof gate for commit `d2a17ce` on 2026-07-28 UTC. Autonomous learning is still locked until a human reviews the generated truth-gate evidence and explicitly opts in. See [docs/DOCKER_PROOF.md](docs/DOCKER_PROOF.md).
+Docker proof status: the GitHub Actions Docker proof gate passes on `main`. Autonomous learning is still locked until a human reviews the generated truth-gate evidence and explicitly opts in. See [docs/DOCKER_PROOF.md](docs/DOCKER_PROOF.md).
 
 Three training loops support that product flywheel:
 

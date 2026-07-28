@@ -216,7 +216,7 @@ Results:
 - Current repaired seed task bank: passed executable starter/reference validation with 20/20 executable tasks, 20/20 starters failing, 20/20 references passing, and 5/5 optimization benchmark proofs passing for reference artifacts.
 - Docker proof runner dry-run: passed and emitted the exact command plan.
 - Docker proof runner real run in current WSL: blocked cleanly because Docker daemon integration is unavailable; it wrote a blocked proof artifact under `data/proofs/docker_gate/`.
-- GitHub Actions Docker proof passed for commit `d2a17ce396ae4e00ecc1497d51133dbd3227e029` in run `30316051838` on 2026-07-28 UTC:
+- GitHub Actions Docker proof passes on `main`. Inspect the latest `tokagotchi-docker-proof` artifact before copying gate evidence:
   - `truth_grounding_passed: true`
   - git tree clean
   - task bank valid: 20/20 tasks, 20/20 starters failed, 20/20 references passed, 5/5 benchmarks passed

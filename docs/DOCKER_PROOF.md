@@ -114,13 +114,11 @@ The proof is only acceptable when all of these are true:
 
 The current safety gate also requires `git_dirty: false` in the evidence file.
 
-## Latest verified proof
+## Passing proof summary
 
-GitHub Actions passed the Docker proof gate for commit
-`d2a17ce396ae4e00ecc1497d51133dbd3227e029` in run `30316051838`
-on 2026-07-28 UTC.
-
-Machine-readable artifact summary:
+GitHub Actions runs this proof gate for relevant changes on `main`. Inspect the
+latest `tokagotchi-docker-proof` artifact before copying or adapting gate
+evidence. A passing machine-readable artifact has this shape:
 
 - `proof.status: passed`
 - `truth_gate_candidate.truth_grounding_passed: true`
