@@ -1692,6 +1692,7 @@ def test_27_tokagotchi_doctor():
             [
                 sys.executable,
                 "scripts/tokagotchi_doctor.py",
+                "--skip-git",
                 "--skip-codex",
                 "--skip-docker",
                 "--json-out",

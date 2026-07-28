@@ -55,11 +55,12 @@ Check readiness first:
 python3 scripts/tokagotchi_doctor.py --check-ollama
 ```
 
-Inside CI/proof containers, do not require user-local tools such as a logged-in
-Codex CLI or local Ollama service. Use explicit skip flags for that environment:
+Inside CI/proof containers, do not require `.git`, user-local tools such as a
+logged-in Codex CLI, or a local Ollama service. Use explicit skip flags for that
+environment:
 
 ```bash
-python3 scripts/tokagotchi_doctor.py --skip-codex --skip-docker
+python3 scripts/tokagotchi_doctor.py --skip-git --skip-codex --skip-docker
 ```
 
 ## WSL with Windows Docker Desktop
